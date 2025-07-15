@@ -1,0 +1,51 @@
+# MVP Requirements - Enhanced with Neo4j and Maven support
+
+# Core FastAPI and web framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+
+# ChromaDB for vector search
+chromadb==0.4.18
+sentence-transformers==2.2.2
+
+# Neo4j for graph relationships and Maven dependencies
+neo4j==5.15.0
+py2neo==2021.2.4
+
+# File processing
+python-magic==0.4.27
+chardet==5.2.0
+
+# HTTP client
+httpx==0.25.2
+
+# Data processing
+pandas==2.1.4
+numpy==1.24.3
+
+# Tree-sitter for code parsing
+tree-sitter==0.20.4
+tree-sitter-languages==1.8.0
+
+# Git operations (for local repo processing)
+GitPython==3.1.40
+
+# Text processing
+beautifulsoup4==4.12.2
+markdown==3.5.1
+lxml==4.9.3
+
+# Maven POM parsing
+xmltodict==0.13.0
+
+# Configuration
+python-dotenv==1.0.0
+pyyaml==6.0.1
+
+# Network analysis for dependencies
+networkx==3.2.1
+
+# Utilities
+click==8.1.7
+rich==13.7.0

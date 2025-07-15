@@ -1,0 +1,2 @@
+admin:codebase-rag-2024
+readonly:readonly-user-2024

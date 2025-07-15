@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  # ChromaDB - Vector Database (Essential for semantic search)
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: codebase-rag-chromadb
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+      - ANONYMIZED_TELEMETRY=false
+    networks:
+      - codebase-rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    mem_limit: 4g
+    cpus: 4
+
+  # Neo4j - Graph Database (For Maven dependencies and code relationships)
+  neo4j:
+    image: neo4j:5.15-enterprise
+    container_name: codebase-rag-neo4j
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/codebase-rag-2024
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=apoc.*
+      - NEO4J_dbms_memory_heap_initial_size=2G
+      - NEO4J_dbms_memory_heap_max_size=4G
+      - NEO4J_dbms_memory_pagecache_size=4G
+      - NEO4J_dbms_default_listen_address=0.0.0.0
+      - NEO4J_dbms_connector_bolt_advertised_address=localhost:7687
+      - NEO4J_dbms_connector_http_advertised_address=localhost:7474
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - ./mvp/neo4j-init:/scripts
+    networks:
+      - codebase-rag-network
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "codebase-rag-2024", "MATCH () RETURN count(*) as count"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    mem_limit: 8g
+    cpus: 4
+
+  # API Service - FastAPI application
+  api:
+    build:
+      context: .
+      dockerfile: mvp/Dockerfile.api
+    container_name: codebase-rag-api
+    ports:
+      - "8080:8080"
+    depends_on:
+      - chromadb
+      - neo4j
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=codebase-rag-2024
+      - NEO4J_DATABASE=neo4j
+      - LOG_LEVEL=INFO
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - MAVEN_ENABLED=true
+    volumes:
+      # Mount your local repositories here - will be updated by start script
+      - /path/to/your/repos:/app/repos:ro
+      - ./logs:/app/logs
+      - ./data:/app/data
+    networks:
+      - codebase-rag-network
+    restart: unless-stopped
+    mem_limit: 4g
+    cpus: 4
+
+networks:
+  codebase-rag-network:
+    driver: bridge
+
+volumes:
+  chromadb_data:
+  neo4j_data:
+  neo4j_logs:

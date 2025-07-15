@@ -1,0 +1,61 @@
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    libffi-dev \
+    libssl-dev \
+    python3-dev \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Tree-sitter parsers
+RUN python -c "
+import tree_sitter_languages
+tree_sitter_languages.get_parser('python')
+tree_sitter_languages.get_parser('javascript')
+tree_sitter_languages.get_parser('typescript')
+tree_sitter_languages.get_parser('rust')
+tree_sitter_languages.get_parser('go')
+tree_sitter_languages.get_parser('java')
+tree_sitter_languages.get_parser('cpp')
+tree_sitter_languages.get_parser('c_sharp')
+tree_sitter_languages.get_parser('ruby')
+tree_sitter_languages.get_parser('php')
+"
+
+# Copy application code
+COPY src/ ./src/
+COPY config/ ./config/
+COPY scripts/ ./scripts/
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data/repositories
+
+# Set proper permissions
+RUN chmod +x scripts/*.py
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Run the application
+CMD ["python", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "4"]
