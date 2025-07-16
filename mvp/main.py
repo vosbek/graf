@@ -14,9 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from .indexer import CodebaseIndexer
-from .search import CodebaseSearch
-from .neo4j_client import Neo4jClient
+from indexer import CodebaseIndexer
+from search import CodebaseSearch
+from neo4j_client import Neo4jClient
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)

@@ -1,5 +1,5 @@
-# Codebase RAG MVP - Simple Startup Script for Windows
-# This script starts the minimal viable product for local development
+# Codebase RAG MVP - Windows Enterprise Startup Script
+# This script starts the minimal viable product for enterprise Windows environments
 
 # Set error handling
 $ErrorActionPreference = "Stop"
@@ -51,7 +51,7 @@ function Test-SystemRequirements {
 }
 
 Write-ColorOutput "==================================================================" "Blue"
-Write-ColorOutput "🚀 Starting Codebase RAG MVP with Neo4j & Maven" "Blue"
+Write-ColorOutput "🚀 Starting Codebase RAG MVP - Windows Enterprise Edition" "Blue"
 Write-ColorOutput "==================================================================" "Blue"
 Write-Host ""
 
@@ -59,7 +59,7 @@ Write-Host ""
 if (-not (Test-SystemRequirements)) {
     Write-ColorOutput "❌ System requirements not met. Please check the issues above." "Red"
     Write-Host ""
-    Write-ColorOutput "📖 For help, see: docs/WINDOWS-QUICKSTART.md" "Yellow"
+    Write-ColorOutput "📖 For help, see: README-WINDOWS-ENTERPRISE.md" "Yellow"
     exit 1
 }
 Write-Host ""
@@ -69,7 +69,7 @@ if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
     Write-ColorOutput "❌ Podman is not installed or not in PATH" "Red"
     Write-Host "Please install Podman Desktop first."
     Write-Host ""
-    Write-ColorOutput "📖 Installation guide: docs/WINDOWS-QUICKSTART.md#step-1-install-prerequisites" "Yellow"
+    Write-ColorOutput "📖 Installation guide: README-WINDOWS-ENTERPRISE.md#prerequisites" "Yellow"
     exit 1
 }
 
@@ -280,6 +280,7 @@ Write-Host "   3. Use dependency analysis to find missing repositories"
 Write-Host "   4. Start searching your code with semantic queries"
 Write-Host ""
 Write-ColorOutput "📖 Documentation:" "Yellow"
+Write-Host "   • Enterprise Setup: README-WINDOWS-ENTERPRISE.md"
 Write-Host "   • Dependency Discovery: docs/DEPENDENCY-DISCOVERY.md"
 Write-Host "   • Troubleshooting: docs/WINDOWS-TROUBLESHOOTING.md"
 Write-Host ""
