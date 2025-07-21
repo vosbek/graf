@@ -203,6 +203,37 @@ if [ ! -f ".env" ]; then
     echo "  1. Create .env file: cp .env.template .env"
 fi
 
+# Check AWS credential configuration more thoroughly
+echo
+echo "🔐 AWS Configuration Status:"
+
+# Check if any AWS credentials are configured
+AWS_CONFIGURED=false
+
+if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
+    echo "✅ AWS credentials set via environment variables"
+    AWS_CONFIGURED=true
+elif grep -q "AWS_ACCESS_KEY_ID=" .env 2>/dev/null && [ -n "$(grep AWS_ACCESS_KEY_ID .env | cut -d'=' -f2)" ]; then
+    echo "✅ AWS credentials configured in .env file"
+    AWS_CONFIGURED=true
+elif [ -f "$HOME/.aws/credentials" ]; then
+    echo "✅ AWS credentials file exists: $HOME/.aws/credentials"
+    AWS_CONFIGURED=true
+elif [ -f "$HOME/.aws/config" ]; then
+    echo "⚠️  AWS config exists but no credentials file found"
+else
+    echo "❌ No AWS credentials found"
+fi
+
+if [ "$AWS_CONFIGURED" = true ]; then
+    echo "   Mode: FULL AI Agent with AWS Strands support"
+    echo "   Capabilities: Natural language analysis, advanced migration planning"
+else
+    echo "   Mode: FALLBACK Agent (basic responses only)"
+    echo "   Setup: See .aws-credentials.template for AWS configuration"
+fi
+
+echo
 if [ ! -d "frontend/build" ]; then
     echo "  2. Build and start MVP: ./start-mvp-with-ui.sh"
 else
@@ -210,9 +241,15 @@ else
 fi
 
 echo "  3. Open browser: http://localhost:8080"
-echo "  4. Index your first repository"
-echo "  5. Start analyzing!"
+echo "  4. Check status: curl http://localhost:8080/health"
+echo "  5. Index your first repository"
+echo "  6. Start analyzing!"
 
 echo
-echo "For AWS setup (optional): See .aws-credentials.template"
+echo "📋 Startup Validation:"
+echo "   - MVP will validate AWS credentials on startup"
+echo "   - Check logs for detailed credential status"
+echo "   - Visit /health endpoint for real-time status"
+echo
+echo "For AWS setup: See .aws-credentials.template"
 echo "For troubleshooting: See SETUP-GUIDE.md"

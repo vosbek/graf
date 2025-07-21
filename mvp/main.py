@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import boto3
 
 from indexer import CodebaseIndexer
 from search import CodebaseSearch
@@ -41,6 +42,7 @@ API_PORT = int(os.getenv("API_PORT", "8080"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 MAX_CONCURRENT_REPOS = int(os.getenv("MAX_CONCURRENT_REPOS", "10"))
 AI_AGENT_ENABLED = os.getenv("AI_AGENT_ENABLED", "true").lower() == "true"
+AWS_REQUIRED = os.getenv("AWS_REQUIRED", "false").lower() == "true"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -69,6 +71,91 @@ indexer: Optional[CodebaseIndexer] = None
 search: Optional[CodebaseSearch] = None
 neo4j_client: Optional[Neo4jClient] = None
 struts_parser: Optional[StrutsParser] = None
+
+
+async def _validate_aws_credentials(agent_instance) -> Dict[str, Any]:
+    """
+    Validate AWS credentials and agent initialization status.
+    
+    Returns:
+        Dict with agent_mode, credentials_valid, and reason
+    """
+    import boto3
+    from botocore.exceptions import NoCredentialsError, ClientError
+    
+    status = {
+        "agent_mode": "failed",
+        "credentials_valid": False,
+        "reason": "Unknown"
+    }
+    
+    try:
+        # Check if agent has AWS Strands available
+        if not agent_instance:
+            status["reason"] = "Agent instance not created"
+            return status
+            
+        if not agent_instance.agent:
+            # Agent is in fallback mode - check why
+            
+            # First check if AWS credentials exist
+            try:
+                # Try multiple credential sources
+                session = boto3.Session()
+                credentials = session.get_credentials()
+                
+                if not credentials:
+                    status["agent_mode"] = "fallback"
+                    status["reason"] = "No AWS credentials found (check .env file or aws configure)"
+                    return status
+                
+                # Test if credentials are valid
+                sts = boto3.client('sts')
+                identity = sts.get_caller_identity()
+                
+                status["credentials_valid"] = True
+                
+                # Check if Bedrock is accessible (needed for Strands)
+                try:
+                    bedrock = boto3.client('bedrock', region_name='us-east-1')
+                    bedrock.list_foundation_models()
+                    
+                    # Credentials are valid and Bedrock accessible, but agent still failed
+                    status["agent_mode"] = "fallback" 
+                    status["reason"] = "AWS credentials valid but Strands library not available (pip install strands-agents)"
+                    
+                except Exception as bedrock_error:
+                    status["agent_mode"] = "fallback"
+                    if "AccessDenied" in str(bedrock_error):
+                        status["reason"] = "AWS credentials valid but missing Bedrock permissions"
+                    else:
+                        status["reason"] = f"Bedrock service unavailable: {str(bedrock_error)[:100]}"
+                
+            except NoCredentialsError:
+                status["agent_mode"] = "fallback"
+                status["reason"] = "No AWS credentials configured"
+                
+            except ClientError as e:
+                status["agent_mode"] = "fallback"
+                if e.response['Error']['Code'] == 'AccessDenied':
+                    status["reason"] = "AWS credentials invalid or expired"
+                else:
+                    status["reason"] = f"AWS credential error: {e.response['Error']['Code']}"
+                    
+            except Exception as e:
+                status["agent_mode"] = "fallback"
+                status["reason"] = f"AWS credential validation failed: {str(e)[:100]}"
+                
+        else:
+            # Agent initialized successfully with AWS
+            status["agent_mode"] = "aws"
+            status["credentials_valid"] = True
+            status["reason"] = "AWS Strands agent initialized successfully"
+            
+    except Exception as e:
+        status["reason"] = f"Validation error: {str(e)[:100]}"
+        
+    return status
 
 
 # Request/Response models
@@ -140,13 +227,36 @@ async def startup_event():
         await neo4j_client.initialize()
         
         # Initialize AI Agent for natural language queries
-        AgentService.initialize(
+        agent_instance = AgentService.initialize(
             neo4j_client=neo4j_client,
             chromadb_client=indexer.client,  # ChromaDB client from indexer
             search_client=search
         )
         
-        logger.info("Codebase RAG MVP started successfully with AI Agent and Neo4j support!")
+        # Validate AWS credentials and agent initialization
+        aws_status = await _validate_aws_credentials(agent_instance)
+        
+        if aws_status["agent_mode"] == "aws":
+            logger.info("🎉 Codebase RAG MVP started successfully with FULL AI Agent and AWS Strands support!")
+        elif aws_status["agent_mode"] == "fallback":
+            if AWS_REQUIRED:
+                logger.error("❌ STARTUP FAILED: AWS credentials are REQUIRED but missing/invalid")
+                logger.error(f"   Reason: {aws_status['reason']}")
+                logger.error("   Set AWS_REQUIRED=false in .env to allow fallback mode")
+                logger.error("   Or configure AWS credentials (see .aws-credentials.template)")
+                raise ValueError(f"AWS credentials required but unavailable: {aws_status['reason']}")
+            else:
+                logger.warning("⚠️  Codebase RAG MVP started in FALLBACK MODE - AWS credentials missing/invalid")
+                logger.warning(f"   Reason: {aws_status['reason']}")
+                logger.warning("   AI Agent will provide basic responses only")
+                logger.warning("   For full functionality, configure AWS credentials (see .aws-credentials.template)")
+                logger.warning("   To require AWS credentials, set AWS_REQUIRED=true in .env")
+        else:
+            logger.error("❌ AI Agent failed to initialize - check configuration")
+            if AWS_REQUIRED:
+                raise ValueError("AI Agent initialization failed and AWS is required")
+            
+        logger.info("✅ Core services (ChromaDB, Neo4j, Search) are fully functional")
         
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
@@ -171,16 +281,33 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with AWS credential status."""
     try:
         # Check ChromaDB connection
-        status = await search.health_check() if search else False
+        chromadb_status = await search.health_check() if search else False
+        
+        # Check AWS credential status
+        agent = AgentService.get_agent()
+        aws_status = await _validate_aws_credentials(agent) if agent else {
+            "agent_mode": "not_initialized",
+            "credentials_valid": False,
+            "reason": "Agent service not initialized"
+        }
+        
+        overall_status = "healthy" if chromadb_status else "unhealthy"
         
         return {
-            "status": "healthy" if status else "unhealthy",
-            "chromadb": "connected" if status else "disconnected",
+            "status": overall_status,
+            "chromadb": "connected" if chromadb_status else "disconnected",
+            "neo4j": "connected" if neo4j_client else "not_initialized",
+            "ai_agent": {
+                "mode": aws_status["agent_mode"],
+                "aws_credentials_valid": aws_status["credentials_valid"],
+                "status_reason": aws_status["reason"]
+            },
             "repos_path": REPOS_PATH,
-            "repos_available": os.path.exists(REPOS_PATH)
+            "repos_available": os.path.exists(REPOS_PATH),
+            "ai_agent_enabled": AI_AGENT_ENABLED
         }
     except Exception as e:
         return JSONResponse(

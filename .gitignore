@@ -13,6 +13,15 @@ ENV/
 env.bak/
 venv.bak/
 
+# Node.js and npm
+node_modules/
+frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+
 # IDE
 .vscode/
 .idea/
