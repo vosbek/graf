@@ -17,6 +17,8 @@ from pydantic import BaseModel
 from indexer import CodebaseIndexer
 from search import CodebaseSearch
 from neo4j_client import Neo4jClient
+from struts_parser import StrutsParser
+from agents import AgentService
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +54,7 @@ app.add_middleware(
 indexer: Optional[CodebaseIndexer] = None
 search: Optional[CodebaseSearch] = None
 neo4j_client: Optional[Neo4jClient] = None
+struts_parser: Optional[StrutsParser] = None
 
 
 # Request/Response models
@@ -73,10 +76,21 @@ class SearchResult(BaseModel):
     metadata: Dict[str, Any]
 
 
+class AgentRequest(BaseModel):
+    question: str
+    repository: Optional[str] = None
+
+
+class AgentResponse(BaseModel):
+    answer: str
+    question: str
+    repository: Optional[str] = None
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize components on startup."""
-    global indexer, search, neo4j_client
+    global indexer, search, neo4j_client, struts_parser
     
     logger.info("Starting Codebase RAG MVP with Neo4j and Maven support...")
     
@@ -103,12 +117,22 @@ async def startup_event():
         # Initialize Neo4j client for direct queries
         neo4j_client = Neo4jClient(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
         
+        # Initialize Struts parser
+        struts_parser = StrutsParser()
+        
         # Initialize all components
         await indexer.initialize()
         await search.initialize()
         await neo4j_client.initialize()
         
-        logger.info("Codebase RAG MVP started successfully with Neo4j and Maven support!")
+        # Initialize AI Agent for natural language queries
+        AgentService.initialize(
+            neo4j_client=neo4j_client,
+            chromadb_client=indexer.client,  # ChromaDB client from indexer
+            search_client=search
+        )
+        
+        logger.info("Codebase RAG MVP started successfully with AI Agent and Neo4j support!")
         
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
@@ -417,6 +441,293 @@ async def execute_graph_query(
     except Exception as e:
         logger.error(f"Failed to execute graph query: {e}")
         raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")
+
+
+
+# Struts-specific endpoints for legacy application migration
+@app.post("/struts/analyze")
+async def analyze_struts_repository(request: IndexRequest):
+    """Analyze a Struts application repository for migration planning."""
+    if not struts_parser:
+        raise HTTPException(status_code=500, detail="Struts parser not initialized")
+    
+    try:
+        repo_path = Path(request.repo_path)
+        
+        # Validate repository path
+        if not repo_path.exists():
+            raise HTTPException(status_code=404, detail=f"Repository path not found: {request.repo_path}")
+        
+        # Analyze Struts application
+        repo_name = request.repo_name or repo_path.name
+        analysis = struts_parser.analyze_struts_application(str(repo_path))
+        
+        return {
+            "status": "success",
+            "repository": repo_name,
+            "analysis": analysis
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to analyze Struts repository: {e}")
+        raise HTTPException(status_code=500, detail=f"Struts analysis failed: {str(e)}")
+
+
+@app.get("/struts/actions")
+async def get_struts_actions(
+    repository: Optional[str] = Query(None, description="Filter by repository")
+):
+    """Get all Struts actions discovered in indexed repositories."""
+    if not search:
+        raise HTTPException(status_code=500, detail="Search not initialized")
+    
+    try:
+        # Search for Struts Action classes
+        query = "extends Action execute method ActionForward"
+        if repository:
+            query += f" repository:{repository}"
+        
+        results = await search.search(
+            query=query,
+            limit=100,
+            similarity_threshold=0.6
+        )
+        
+        # Process results to extract action information
+        actions = []
+        for result in results:
+            if "Action" in result["file_path"] and ".java" in result["file_path"]:
+                actions.append({
+                    "file_path": result["file_path"],
+                    "class_name": Path(result["file_path"]).stem,
+                    "score": result["score"],
+                    "content_preview": result["content"][:200] + "..."
+                })
+        
+        return {
+            "actions": actions,
+            "total": len(actions),
+            "repository": repository
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get Struts actions: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get actions: {str(e)}")
+
+
+@app.get("/struts/migration-plan/{repository}")
+async def generate_migration_plan(repository: str):
+    """Generate a GraphQL migration plan for a Struts repository."""
+    if not search or not struts_parser:
+        raise HTTPException(status_code=500, detail="Required components not initialized")
+    
+    try:
+        # Analyze business logic patterns
+        business_logic_query = "business logic validation calculate process transform"
+        business_results = await search.search(
+            query=f"{business_logic_query} repository:{repository}",
+            limit=50,
+            similarity_threshold=0.6
+        )
+        
+        # Analyze data models
+        data_model_query = "data model DTO bean entity form"
+        data_results = await search.search(
+            query=f"{data_model_query} repository:{repository}",
+            limit=50,
+            similarity_threshold=0.6
+        )
+        
+        # Generate migration suggestions
+        migration_plan = {
+            "repository": repository,
+            "analysis_summary": {
+                "business_logic_components": len(business_results),
+                "data_models_found": len(data_results)
+            },
+            "graphql_suggestions": {
+                "recommended_types": [],
+                "recommended_queries": [],
+                "recommended_mutations": []
+            },
+            "migration_steps": [
+                "1. Analyze discovered business logic components",
+                "2. Design GraphQL schema from data models", 
+                "3. Map Struts actions to GraphQL operations",
+                "4. Implement resolvers with extracted business logic",
+                "5. Test migration incrementally"
+            ]
+        }
+        
+        # Extract suggested GraphQL types from data models
+        for result in data_results[:10]:
+            file_name = Path(result["file_path"]).stem
+            if "Form" in file_name or "DTO" in file_name or "Bean" in file_name:
+                type_name = file_name.replace("Form", "").replace("DTO", "").replace("Bean", "")
+                if type_name:
+                    migration_plan["graphql_suggestions"]["recommended_types"].append(type_name)
+        
+        return migration_plan
+        
+    except Exception as e:
+        logger.error(f"Failed to generate migration plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Migration plan generation failed: {str(e)}")
+
+
+@app.get("/search/legacy-patterns")
+async def search_legacy_patterns(
+    pattern: str = Query(..., description="Legacy pattern to search for (struts, hibernate, jsp, etc.)"),
+    repository: Optional[str] = Query(None, description="Filter by repository"),
+    limit: int = Query(20, ge=1, le=100, description="Number of results")
+):
+    """Enhanced search for common legacy code patterns."""
+    if not search:
+        raise HTTPException(status_code=500, detail="Search not initialized")
+    
+    try:
+        # Define pattern-specific search queries
+        pattern_queries = {
+            "struts": "struts action form jsp extends Action ActionForm",
+            "hibernate": "hibernate entity annotation @Entity @Table Session",
+            "jsp": "jsp scriptlet taglib html:form bean:write logic:iterate",
+            "spring": "spring bean @Component @Service @Repository @Autowired",
+            "ejb": "EJB @Stateless @Entity @Remote @Local",
+            "servlet": "servlet HttpServlet doGet doPost",
+            "validation": "validation validate error message required",
+            "database": "database connection sql query prepared statement",
+            "configuration": "configuration properties xml config settings"
+        }
+        
+        # Get query for pattern or use the pattern itself
+        query = pattern_queries.get(pattern.lower(), pattern)
+        if repository:
+            query += f" repository:{repository}"
+        
+        results = await search.search(
+            query=query,
+            limit=limit,
+            similarity_threshold=0.5
+        )
+        
+        # Categorize results by file type
+        categorized_results = {
+            "java_files": [],
+            "config_files": [],
+            "jsp_files": [],
+            "other_files": []
+        }
+        
+        for result in results:
+            file_path = result["file_path"]
+            result_data = {
+                "file_path": file_path,
+                "score": result["score"],
+                "content_preview": result["content"][:300] + "..."
+            }
+            
+            if file_path.endswith('.java'):
+                categorized_results["java_files"].append(result_data)
+            elif any(file_path.endswith(ext) for ext in ['.xml', '.properties', '.yml', '.yaml']):
+                categorized_results["config_files"].append(result_data)
+            elif any(file_path.endswith(ext) for ext in ['.jsp', '.tag', '.tagx']):
+                categorized_results["jsp_files"].append(result_data)
+            else:
+                categorized_results["other_files"].append(result_data)
+        
+        return {
+            "pattern": pattern,
+            "repository": repository,
+            "total_results": len(results),
+            "results": categorized_results,
+            "available_patterns": list(pattern_queries.keys())
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to search legacy patterns: {e}")
+        raise HTTPException(status_code=500, detail=f"Legacy pattern search failed: {str(e)}")
+
+
+# AI Agent endpoint for natural language queries
+@app.post("/agent/ask", response_model=AgentResponse)
+async def ask_agent(request: AgentRequest):
+    """
+    Ask the AI agent questions about your Struts codebase in natural language.
+    
+    The agent can help you understand your application, find business logic,
+    analyze dependencies, and plan your migration to modern architecture.
+    
+    Example questions:
+    - "What are all the payment processing endpoints?"
+    - "Show me the user authentication business logic" 
+    - "How complex would it be to migrate the order management system?"
+    - "What security patterns are used in this application?"
+    """
+    agent = AgentService.get_agent()
+    if not agent:
+        raise HTTPException(status_code=500, detail="AI Agent not initialized")
+    
+    try:
+        # Add repository context to question if provided
+        question = request.question
+        if request.repository:
+            question += f" (focus on repository: {request.repository})"
+        
+        # Get answer from the AI agent
+        answer = await agent.ask(question)
+        
+        return AgentResponse(
+            answer=answer,
+            question=request.question,
+            repository=request.repository
+        )
+        
+    except Exception as e:
+        logger.error(f"Agent query failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Agent query failed: {str(e)}")
+
+
+@app.get("/agent/capabilities")
+async def get_agent_capabilities():
+    """Get information about what the AI agent can help you with."""
+    agent = AgentService.get_agent()
+    if not agent:
+        raise HTTPException(status_code=500, detail="AI Agent not initialized")
+    
+    try:
+        capabilities = agent.get_capabilities()
+        return capabilities
+        
+    except Exception as e:
+        logger.error(f"Failed to get agent capabilities: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get capabilities: {str(e)}")
+
+
+@app.get("/agent/health")
+async def check_agent_health():
+    """Check the health status of the AI agent and its dependencies."""
+    agent = AgentService.get_agent()
+    if not agent:
+        return {
+            "status": "unhealthy",
+            "agent_initialized": False,
+            "error": "Agent not initialized"
+        }
+    
+    try:
+        health = await agent.health_check()
+        overall_status = "healthy" if all(health.values()) else "unhealthy"
+        
+        return {
+            "status": overall_status,
+            **health
+        }
+        
+    except Exception as e:
+        logger.error(f"Agent health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
 
 
 if __name__ == "__main__":

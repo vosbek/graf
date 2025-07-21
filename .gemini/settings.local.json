@@ -1,0 +1,14 @@
+{
+  "selectedAuthType": "google-login",
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(sed:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:learn.microsoft.com)",
+      "WebFetch(domain:docs.microsoft.com)",
+      "Bash(rg:*)"
+    ],
+    "deny": []
+  }
+}

@@ -71,7 +71,14 @@ class CodebaseIndexer:
             '.css': 'css',
             '.sql': 'sql',
             '.sh': 'bash',
-            '.dockerfile': 'dockerfile'
+            '.dockerfile': 'dockerfile',
+            # Struts/Legacy web framework support
+            '.jsp': 'jsp',
+            '.tag': 'jsp',
+            '.tagx': 'jsp',
+            '.properties': 'properties',
+            '.ftl': 'freemarker',
+            '.vm': 'velocity'
         }
         
         # Directories to exclude

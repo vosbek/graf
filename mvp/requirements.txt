@@ -49,3 +49,6 @@ networkx==3.2.1
 # Utilities
 click==8.1.7
 rich==13.7.0
+
+# AWS Strand Agents SDK for natural language interface
+strands-agents
