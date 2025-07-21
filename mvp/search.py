@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 import chromadb
 from chromadb.config import Settings
 
-from .neo4j_client import Neo4jClient
+from neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
 

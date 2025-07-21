@@ -16,8 +16,8 @@ import tree_sitter_languages
 import magic
 import chardet
 
-from .neo4j_client import Neo4jClient
-from .maven_parser import MavenParser
+from neo4j_client import Neo4jClient
+from maven_parser import MavenParser
 
 logger = logging.getLogger(__name__)
 

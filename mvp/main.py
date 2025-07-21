@@ -12,6 +12,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from indexer import CodebaseIndexer
@@ -24,15 +25,22 @@ from agents import AgentService
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration
+# Configuration from environment variables
 CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "codebase-rag-2024")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 MAVEN_ENABLED = os.getenv("MAVEN_ENABLED", "true").lower() == "true"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-REPOS_PATH = os.getenv("REPOS_PATH", "/app/repos")
+REPOS_PATH = os.getenv("REPOS_PATH", "./data/repositories")
+APP_ENV = os.getenv("APP_ENV", "development")
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "8080"))
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+MAX_CONCURRENT_REPOS = int(os.getenv("MAX_CONCURRENT_REPOS", "10"))
+AI_AGENT_ENABLED = os.getenv("AI_AGENT_ENABLED", "true").lower() == "true"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -49,6 +57,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve static files (React frontend)
+frontend_build_path = Path(__file__).parent.parent / "frontend" / "build"
+if frontend_build_path.exists():
+    app.mount("/static", StaticFiles(directory=str(frontend_build_path / "static")), name="static")
+    app.mount("/", StaticFiles(directory=str(frontend_build_path), html=True), name="frontend")
 
 # Global components
 indexer: Optional[CodebaseIndexer] = None
@@ -416,6 +430,70 @@ async def get_repository_graph(repo_name: str):
         raise HTTPException(status_code=500, detail=f"Failed to get graph data: {str(e)}")
 
 
+@app.get("/graph/repository/{repo_name}/visualization")
+async def get_repository_graph_visualization(repo_name: str):
+    """Get graph visualization data for a repository."""
+    if not neo4j_client:
+        raise HTTPException(status_code=500, detail="Neo4j not initialized")
+    
+    try:
+        # Get nodes and relationships for visualization
+        nodes_query = """
+        MATCH (n)
+        WHERE n.repository = $repo_name OR n.name = $repo_name
+        RETURN 
+            id(n) as id,
+            labels(n)[0] as type,
+            n.name as name,
+            n.repository as repository,
+            n.path as path,
+            n.language as language,
+            n.size as size,
+            n.version as version,
+            n.groupId as groupId,
+            n.artifactId as artifactId
+        LIMIT 100
+        """
+        
+        relationships_query = """
+        MATCH (n)-[r]->(m)
+        WHERE (n.repository = $repo_name OR n.name = $repo_name) 
+           OR (m.repository = $repo_name OR m.name = $repo_name)
+        RETURN 
+            id(n) as source_id,
+            id(m) as target_id,
+            type(r) as relationship_type,
+            r.weight as weight
+        LIMIT 200
+        """
+        
+        nodes_result = await neo4j_client.execute_query(nodes_query, {"repo_name": repo_name})
+        relationships_result = await neo4j_client.execute_query(relationships_query, {"repo_name": repo_name})
+        
+        # Format for frontend visualization
+        graph_data = {
+            "nodes": nodes_result,
+            "edges": relationships_result,
+            "repository": repo_name,
+            "node_count": len(nodes_result),
+            "edge_count": len(relationships_result)
+        }
+        
+        return graph_data
+        
+    except Exception as e:
+        logger.error(f"Failed to get repository graph visualization: {e}")
+        # Return sample data if Neo4j query fails
+        return {
+            "nodes": [],
+            "edges": [],
+            "repository": repo_name,
+            "node_count": 0,
+            "edge_count": 0,
+            "sample_mode": True
+        }
+
+
 @app.get("/graph/query")
 async def execute_graph_query(
     cypher: str = Query(..., description="Cypher query to execute"),
@@ -731,11 +809,11 @@ async def check_agent_health():
 
 
 if __name__ == "__main__":
-    # Run the application
+    # Run the application with environment configuration
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
-        port=8080,
+        host=API_HOST,
+        port=API_PORT,
         log_level=LOG_LEVEL.lower(),
-        reload=False
+        reload=(APP_ENV == "development")
     )

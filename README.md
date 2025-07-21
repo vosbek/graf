@@ -23,29 +23,39 @@ Perfect for **Struts → GraphQL migration** planning and **enterprise codebase 
 
 ## ⚡ **Quick Start**
 
-### **1. Install & Start (5 minutes)**
+### **🖥️ NEW: Web Interface (Recommended)**
 ```bash
 # Clone and setup
 git clone <this-repo> CodebaseRAG
 cd CodebaseRAG
 
-# Set your repositories path
-export REPOS_PATH="/path/to/your/repos"
+# Check environment (optional)
+./check-environment.sh
 
-# Start MVP (one command)
-./start-mvp-simple.sh
+# Start with Web UI (builds React frontend automatically)
+./start-mvp-with-ui.sh
+
+# Or use Docker
+docker-compose -f docker-compose-mvp-ui.yml up -d
 ```
 
-### **2. Index Your Application (varies by size)**
+**🎉 Access at: http://localhost:8080**
+
+**🔧 Configuration**: Uses `.env` file with secure defaults - AWS optional, works in fallback mode
+
+### **🐚 Command Line Interface (Advanced)**
 ```bash
-# Add your Struts application
+# Traditional CLI approach  
+./start-mvp-simple.sh
+
+# Add your Struts application via API
 curl -X POST "http://localhost:8080/index" \
   -d '{"repo_path": "/path/to/struts-app", "repo_name": "my-app"}'
 ```
 
-### **3. Start Asking Questions (immediately)**
+### **🤖 Natural Language Queries**
 ```python
-# Natural language interface - no curl needed!
+# Python interface - no curl needed!
 from mvp.example_usage import StrutsAnalysisClient
 
 client = StrutsAnalysisClient()
@@ -56,6 +66,44 @@ print(answer)
 ```
 
 **That's it!** Your team can now analyze the codebase conversationally.
+
+---
+
+## 🖥️ **Web Interface Features**
+
+The new React-based web interface provides visual access to all MVP capabilities:
+
+### **📊 Dashboard**
+- Real-time system health monitoring
+- Repository overview with statistics
+- Quick access to all features
+- Progress tracking during indexing
+
+### **📂 Repository Indexer** 
+- Simple form to add local repositories
+- Visual feedback during processing
+- Example paths and instructions
+- Batch indexing support
+
+### **🔍 Search Interface**
+- Semantic code search with results highlighting
+- File path and relevance scoring
+- Code snippet previews
+- Repository filtering
+
+### **🤖 AI Chat Assistant**
+- Natural language conversation interface
+- Example questions to get started
+- Chat history and context
+- Real-time AI responses
+
+### **📈 Migration Planner**
+- Visual migration roadmaps
+- GraphQL schema suggestions
+- Step-by-step recommendations
+- Complexity assessments
+
+**No more curl commands or technical barriers - business users can now directly explore and understand your legacy applications!**
 
 ---
 

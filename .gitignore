@@ -30,6 +30,17 @@ logs/
 # Environment variables
 .env
 .env.local
+.env.production
+.env.custom
+*.env
+
+# AWS credentials
+.aws/
+aws-credentials
+.aws-credentials
+credentials
+*.pem
+*.key
 
 # Container volumes
 data/

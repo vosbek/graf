@@ -7,7 +7,15 @@ import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
-from strands import tool
+try:
+    from strands import tool
+    STRANDS_AVAILABLE = True
+except ImportError:
+    STRANDS_AVAILABLE = False
+    # Create a fallback decorator
+    def tool(func):
+        return func
+    logging.warning("AWS Strands not available - tools will use fallback mode")
 
 logger = logging.getLogger(__name__)
 

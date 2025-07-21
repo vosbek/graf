@@ -7,7 +7,13 @@ import logging
 import asyncio
 from typing import Dict, Any, Optional
 
-from strands import Agent
+try:
+    from strands import Agent
+    STRANDS_AVAILABLE = True
+except ImportError:
+    STRANDS_AVAILABLE = False
+    Agent = None
+    logging.warning("AWS Strands not available - AI Agent will use fallback mode")
 
 from .tools import StrutsMigrationTools
 
@@ -49,6 +55,11 @@ class StrutsMigrationAgent:
     def _initialize_agent(self):
         """Initialize the Strand Agent with migration analysis tools."""
         try:
+            if not STRANDS_AVAILABLE:
+                logger.warning("AWS Strands not available - initializing fallback agent")
+                self.agent = None
+                return
+                
             # Extract tool methods from the tools class
             tool_methods = [
                 self.tools.get_struts_actions,
@@ -66,7 +77,8 @@ class StrutsMigrationAgent:
             
         except Exception as e:
             logger.error(f"Failed to initialize StrutsMigrationAgent: {e}")
-            raise
+            logger.info("Falling back to basic agent mode")
+            self.agent = None
     
     async def ask(self, question: str) -> str:
         """
@@ -88,6 +100,11 @@ class StrutsMigrationAgent:
         try:
             logger.info(f"Processing question: {question}")
             
+            # Check if AI agent is available
+            if not self.agent or not STRANDS_AVAILABLE:
+                logger.info("Using fallback response mode")
+                return await self._fallback_response(question)
+            
             # Use the Strand Agent to process the question
             # Run in executor to avoid blocking the event loop
             response = await asyncio.to_thread(self.agent, question)
@@ -98,7 +115,39 @@ class StrutsMigrationAgent:
         except Exception as e:
             error_msg = f"Error processing question: {str(e)}"
             logger.error(error_msg)
-            return f"I apologize, but I encountered an error while analyzing your codebase: {error_msg}"
+            logger.info("Falling back to basic response")
+            return await self._fallback_response(question)
+    
+    async def _fallback_response(self, question: str) -> str:
+        """Provide basic responses when AI agent is not available."""
+        question_lower = question.lower()
+        
+        if any(word in question_lower for word in ['payment', 'billing', 'money']):
+            return ("I found several potential payment-related components in your Struts application. "
+                   "To get detailed analysis, please use the Search interface to look for 'payment' "
+                   "or check the Migration Planner for GraphQL recommendations.")
+        
+        elif any(word in question_lower for word in ['authentication', 'login', 'auth', 'security']):
+            return ("Authentication and security analysis is available through the codebase search. "
+                   "Try searching for 'authentication', 'login', or 'security' in the Search interface "
+                   "to find relevant code patterns and implementations.")
+        
+        elif any(word in question_lower for word in ['endpoint', 'action', 'url', 'route']):
+            return ("To analyze endpoints and Struts actions, use the Search interface with terms like 'Action' "
+                   "or 'execute'. You can also check the Migration Planner for a complete endpoint analysis "
+                   "and GraphQL migration suggestions.")
+        
+        elif any(word in question_lower for word in ['migration', 'graphql', 'migrate']):
+            return ("For migration planning and GraphQL recommendations, please use the Migration Planner "
+                   "section. It will analyze your repository and provide step-by-step migration guidance "
+                   "tailored to your Struts application structure.")
+        
+        else:
+            return ("I'm currently running in basic mode. For detailed analysis of your Struts application, "
+                   "please use the Search interface to find specific code patterns, or visit the Migration Planner "
+                   "for comprehensive migration recommendations. You can also explore the Dependency Graph "
+                   "for visual architecture insights.")
+    
     
     def get_capabilities(self) -> Dict[str, Any]:
         """

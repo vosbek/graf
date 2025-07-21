@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  # ChromaDB - Vector Database
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: codebase-rag-chromadb-ui
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+      - ANONYMIZED_TELEMETRY=false
+    networks:
+      - codebase-rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # Neo4j - Graph Database
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: codebase-rag-neo4j-ui
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/codebase-rag-2024
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_memory_heap_initial_size=1G
+      - NEO4J_dbms_memory_heap_max_size=2G
+      - NEO4J_dbms_memory_pagecache_size=1G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    networks:
+      - codebase-rag-network
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "codebase-rag-2024", "MATCH () RETURN count(*) as count"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # MVP with Web UI
+  mvp-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.mvp-ui
+    container_name: codebase-rag-mvp-ui
+    ports:
+      - "8080:8080"
+    depends_on:
+      chromadb:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=codebase-rag-2024
+      - REPOS_PATH=/app/data/repositories
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data/repositories:/app/data/repositories
+      - ./logs:/app/logs
+    networks:
+      - codebase-rag-network
+    restart: unless-stopped
+
+networks:
+  codebase-rag-network:
+    driver: bridge
+
+volumes:
+  chromadb_data:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
