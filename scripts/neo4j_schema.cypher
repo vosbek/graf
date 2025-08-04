@@ -32,6 +32,18 @@ CREATE INDEX variable_name_idx IF NOT EXISTS FOR (v:Variable) ON (v.name);
 CREATE INDEX domain_name_idx IF NOT EXISTS FOR (d:Domain) ON (d.name);
 CREATE INDEX service_name_idx IF NOT EXISTS FOR (s:Service) ON (s.name);
 
+// Database constraints and indexes (Additions)
+// Constraints (unique identifiers)
+CREATE CONSTRAINT database_name_unique IF NOT EXISTS FOR (d:Database) REQUIRE d.name IS UNIQUE;
+
+// Indexes for lookup performance
+CREATE INDEX schema_name_idx IF NOT EXISTS FOR (s:Schema) ON (s.name);
+CREATE INDEX table_name_idx IF NOT EXISTS FOR (t:Table) ON (t.name);
+CREATE INDEX view_name_idx IF NOT EXISTS FOR (v:View) ON (v.name);
+CREATE INDEX procedure_name_idx IF NOT EXISTS FOR (p:Procedure) ON (p.name);
+CREATE INDEX function_name2_idx IF NOT EXISTS FOR (f:Function) ON (f.name);
+CREATE INDEX column_name_idx IF NOT EXISTS FOR (c:Column) ON (c.name);
+
 // Full-text search indexes
 CREATE FULLTEXT INDEX code_search_idx IF NOT EXISTS FOR (n:Function|Class|Variable|Module) ON EACH [n.name, n.content, n.docstring];
 CREATE FULLTEXT INDEX repo_search_idx IF NOT EXISTS FOR (r:Repository) ON EACH [r.name, r.description];
@@ -104,6 +116,34 @@ CREATE FULLTEXT INDEX domain_search_idx IF NOT EXISTS FOR (d:Domain) ON EACH [d.
 // :Database
 // Properties: name, type, host, schema, connection_string_template
 
+// Database-aware Nodes (Additions)
+// :Schema
+// Properties: name, owner
+//
+// :Table
+// Properties: name, schema, pk, row_count, last_analyzed
+//
+// :Column
+// Properties: name, data_type, nullable, default, sensitive, comment
+//
+// :View
+// Properties: name, schema, definition_hash
+//
+// :Procedure
+// Properties: name, schema, language, deterministic, authz_enforced
+//
+// :Function
+// Properties: name, schema, language, deterministic
+//
+// :Package
+// Properties: name, schema
+//
+// :Trigger
+// Properties: name, table, event, timing, enabled
+//
+// :Job
+// Properties: name, schedule, owner
+
 // :Queue
 // Properties: name, type, topic, exchange, routing_key
 
@@ -120,6 +160,21 @@ CREATE FULLTEXT INDEX domain_search_idx IF NOT EXISTS FOR (d:Domain) ON EACH [d.
 // (:Repository)-[:DEPENDS_ON]->(:Repository)
 // (:Repository)-[:BELONGS_TO]->(:Domain)
 // (:Repository)-[:IMPLEMENTS]->(:Service)
+
+// Database Relationships (Additions)
+// (:Repository)-[:READS_FROM]->(:Table|:View|:Column)
+// (:Repository)-[:WRITES_TO]->(:Table|:Column)
+// (:Repository)-[:CALLS_DB_PROC]->(:Procedure|:Function)
+// (:Table)-[:FK_REF]->(:Table)
+// (:Table)-[:CONTAINS]->(:Column)
+// (:Schema)-[:CONTAINS]->(:Table)
+// (:Schema)-[:CONTAINS]->(:View)
+// (:Schema)-[:CONTAINS]->(:Procedure)
+// (:Schema)-[:CONTAINS]->(:Function)
+// (:Schema)-[:CONTAINS]->(:Package)
+// (:Database)-[:CONTAINS]->(:Schema)
+// (:Trigger)-[:ATTACHED_TO]->(:Table)
+// (:View)-[:DERIVES_FROM]->(:Table|:View)
 
 // File Structure
 // (:Directory)-[:CONTAINS]->(:File)
