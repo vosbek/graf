@@ -58,7 +58,15 @@ root.render(
   <React.StrictMode>
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <App />
+      {/* Provide a single, centralized health polling source to the entire app */}
+      {(() => {
+        const { SystemHealthProvider } = require('./context/SystemHealthContext');
+        return (
+          <SystemHealthProvider>
+            <App />
+          </SystemHealthProvider>
+        );
+      })()}
     </ThemeProvider>
   </React.StrictMode>
 );

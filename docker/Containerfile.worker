@@ -1,0 +1,56 @@
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    libffi-dev \
+    libssl-dev \
+    python3-dev \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Tree-sitter parsers
+RUN python -c "import tree_sitter_languages; \
+tree_sitter_languages.get_parser('python'); \
+tree_sitter_languages.get_parser('javascript'); \
+tree_sitter_languages.get_parser('typescript'); \
+tree_sitter_languages.get_parser('rust'); \
+tree_sitter_languages.get_parser('go'); \
+tree_sitter_languages.get_parser('java'); \
+tree_sitter_languages.get_parser('cpp'); \
+tree_sitter_languages.get_parser('c_sharp'); \
+tree_sitter_languages.get_parser('ruby'); \
+tree_sitter_languages.get_parser('php')"
+
+# Copy application code
+COPY src/ ./src/
+COPY config/ ./config/
+COPY scripts/ ./scripts/
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data/repositories
+
+# Set proper permissions (if any Python scripts exist)
+RUN find scripts -name "*.py" -exec chmod +x {} \; || true
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import redis; r = redis.Redis(host='redis', port=6379); r.ping()" || exit 1
+
+# Run the worker
+CMD ["python", "-m", "celery", "worker", "-A", "src.services.worker_service", "--loglevel=info", "--concurrency=4"]

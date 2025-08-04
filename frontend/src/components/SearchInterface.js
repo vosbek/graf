@@ -5,14 +5,20 @@ import {
 } from '@mui/material';
 import { Search } from '@mui/icons-material';
 import { ApiService } from '../services/ApiService';
+import { useSystemHealth } from '../context/SystemHealthContext';
 
 function SearchInterface({ repositories }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const { isReady, isLoading: healthLoading, error: healthError } = useSystemHealth();
 
   const handleSearch = async () => {
+    if (!isReady) {
+      setError('System is not ready. Please wait for readiness before searching.');
+      return;
+    }
     if (!query.trim()) return;
 
     setLoading(true);
@@ -37,6 +43,14 @@ function SearchInterface({ repositories }) {
     }
   };
 
+  const readinessBanner = (!isReady || healthLoading || healthError) ? (
+    <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 3 }}>
+      {!isReady ? 'System is starting up. Search is disabled until the system is ready.' :
+       healthLoading ? 'Checking system readiness...' :
+       `Health error: ${healthError}`}
+    </Alert>
+  ) : null;
+
   return (
     <Box>
       <Typography variant="h4" component="h1" gutterBottom>
@@ -45,6 +59,8 @@ function SearchInterface({ repositories }) {
       <Typography variant="body1" color="text.secondary" paragraph>
         Search across all indexed repositories using semantic understanding.
       </Typography>
+
+      {readinessBanner}
 
       {repositories.length === 0 && (
         <Alert severity="info" sx={{ mb: 3 }}>
@@ -63,12 +79,14 @@ function SearchInterface({ repositories }) {
             onKeyPress={handleKeyPress}
             fullWidth
             variant="outlined"
+            disabled={!isReady}
+            helperText={!isReady ? 'System not ready yet. Searching is disabled.' : ''}
           />
           <Button
             variant="contained"
             startIcon={<Search />}
             onClick={handleSearch}
-            disabled={loading || !query.trim() || repositories.length === 0}
+            disabled={!isReady || loading || !query.trim() || repositories.length === 0}
             size="large"
           >
             Search
@@ -106,10 +124,10 @@ function SearchInterface({ repositories }) {
                         <Typography variant="subtitle1" component="span">
                           {result.file_path}
                         </Typography>
-                        <Chip 
-                          label={`${(result.score * 100).toFixed(0)}%`} 
-                          size="small" 
-                          color="primary" 
+                        <Chip
+                          label={`${(result.score * 100).toFixed(0)}%`}
+                          size="small"
+                          color="primary"
                         />
                       </Box>
                     }

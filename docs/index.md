@@ -1,3 +1,37 @@
+# 📚 GraphRAG Documentation Index
+
+This is the canonical entry point for all documentation. Use the navigation below to find what you need quickly.
+
+## 🧭 Quick Navigation
+
+- Overview: [docs/introduction.md](introduction.md)
+- Features: [docs/features.md](features.md)
+- Architecture: [docs/ARCHITECTURE.md](ARCHITECTURE.md)
+- Installation: [docs/installation/index.md](installation/index.md)
+- Usage Guides: [docs/usage/index.md](usage/index.md)
+- Troubleshooting: [docs/troubleshooting-playbook.md](troubleshooting-playbook.md)
+- Root Quick Start: [QUICK-START.md](../QUICK-START.md)
+- Configuration Guide: [CONFIGURATION-GUIDE.md](../CONFIGURATION-GUIDE.md)
+
+## 👤 Audience Paths
+
+- Developers: [docs/ARCHITECTURE.md](ARCHITECTURE.md) → [docs/installation/index.md](installation/index.md) → [docs/usage/index.md](usage/index.md)
+- Operators: [CONFIGURATION-GUIDE.md](../CONFIGURATION-GUIDE.md) → [docker-compose.yml](../docker-compose.yml) → [docs/troubleshooting-playbook.md](troubleshooting-playbook.md)
+- Users: [QUICK-START.md](../QUICK-START.md) → [docs/usage/index.md](usage/index.md)
+
+## 📂 Structure
+
+- Introduction: [docs/introduction.md](introduction.md)
+- Features: [docs/features.md](features.md)
+- Architecture (system overview, components, data flows): [docs/ARCHITECTURE.md](ARCHITECTURE.md)
+- Installation:
+  - Windows: [docs/installation/windows.md](installation/windows.md)
+  - Linux: [docs/installation/linux.md](installation/linux.md)
+- Usage:
+  - AI Agent: [docs/usage/ai-agent.md](usage/ai-agent.md)
+  - Dependency Discovery: [docs/usage/dependency-discovery.md](usage/dependency-discovery.md)
+- Troubleshooting: [docs/troubleshooting-playbook.md](troubleshooting-playbook.md)
+- Legacy/Archive: [docs/archive/](archive/)
 # 📚 Codebase RAG MVP Documentation
 
 Welcome to the comprehensive documentation for the Codebase RAG MVP - your natural language interface for Struts application analysis and migration planning.

@@ -54,3 +54,78 @@ credentials
 # Container volumes
 data/
 volumes/
+
+# AI/ML model cache
+.cache/
+.huggingface/
+models/
+transformers_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Frontend build
+frontend/build/
+frontend/dist/
+
+# Test artifacts and temporary files
+test_results/
+.pytest_cache/
+.coverage
+htmlcov/
+working_integration_results_*.json
+
+# Claude AI assistant files
+.claude/
+.kilocode/
+.kiro/
+.roo/
+.roomodes
+
+# Temporary and system files
+nul
+=2.6
+*.tmp
+*.temp
+
+# Archive and backup directories
+archive/
+backup/
+old/
+
+# Documentation that might be auto-generated
+*-analysis.md
+*-report.md
+horizon*.md
+*changes.md
+*recommendation.md
+
+# Development tools and scripts (keep main ones, ignore temp ones)
+check-status.ps1
+seed_chroma.py
+check_config.py
+
+# Temporary test repositories
+C:/temp/test-local-repo*/
+"C:*temp*test-local-repo*"
+
+# Development compose files
+docker-compose.dev.yml
+podman-compose*.yml
+
+# OpenAPI generated files (if auto-generated)
+# openapi.json
+
+# Strands and tool directories (if they're experimental)
+# strands/
+# tools/ 
+
+# Important: Override exclusions for files we DO want to track
+!requirements.txt
+!requirements-dev.txt
+!test_setup.py
+!INSTALLATION.md
+!START.ps1
+!STOP.ps1

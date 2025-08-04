@@ -17,6 +17,10 @@ from neo4j.exceptions import ServiceUnavailable, TransientError
 from ..processing.code_chunker import EnhancedChunk
 from ..processing.maven_parser import MavenDependency, PomFile
 from ..processing.dependency_resolver import ResolvedDependency, DependencyConflict
+from .multi_repo_schema import (
+    MultiRepoSchemaManager, RepositoryMetadata, BusinessOperationMetadata, 
+    BusinessFlowMetadata, NodeType, RelationshipType, initialize_multi_repo_schema
+)
 
 
 @dataclass
@@ -81,7 +85,7 @@ class GraphQueryResult:
 class Neo4jClient:
     """High-performance Neo4j client for graph operations."""
     
-    def __init__(self, 
+    def __init__(self,
                  uri: str = "bolt://localhost:7687",
                  username: str = "neo4j",
                  password: str = "password",
@@ -110,6 +114,14 @@ class Neo4jClient:
         # Batch operations
         self.batch_size = 1000
         
+        # Multi-repository schema manager
+        self.schema_manager = None
+
+        # Recovery/backoff state
+        self._last_reconnect_ts: float = 0.0
+        self._reconnect_backoff_sec: float = 1.0
+        self._reconnect_backoff_max_sec: float = 8.0
+        
     async def initialize(self):
         """Initialize Neo4j driver and connection."""
         try:
@@ -124,6 +136,10 @@ class Neo4jClient:
             # Verify connectivity
             await self._verify_connectivity()
             
+            # Initialize multi-repository schema
+            self.schema_manager = MultiRepoSchemaManager()
+            await self._initialize_multi_repo_schema()
+            
             self.logger.info("Neo4j client initialized successfully")
             
         except Exception as e:
@@ -133,68 +149,108 @@ class Neo4jClient:
     async def _verify_connectivity(self):
         """Verify Neo4j connectivity."""
         try:
-            with self.driver.session(database=self.database) as session:
-                result = session.run("RETURN 1 as test")
-                record = result.single()
-                if record["test"] != 1:
-                    raise Exception("Connectivity test failed")
-                    
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, self._sync_connectivity_check)
+            if result != 1:
+                raise Exception("Connectivity test failed")
         except Exception as e:
             raise Exception(f"Neo4j connectivity verification failed: {e}")
     
-    async def execute_query(self, query: GraphQuery) -> GraphQueryResult:
-        """Execute a Cypher query."""
-        start_time = time.time()
-        
+    def _sync_connectivity_check(self):
+        """Synchronous connectivity check to run in thread pool."""
+        if self.driver is None:
+            raise RuntimeError("Neo4j driver is not initialized")
+        with self.driver.session(database=self.database) as session:
+            result = session.run("RETURN 1 as test")
+            record = result.single()
+            return record["test"]
+    
+    async def _initialize_multi_repo_schema(self):
+        """Initialize multi-repository schema in Neo4j."""
         try:
-            # Check cache for read-only queries
-            if query.read_only:
-                cache_key = self._generate_cache_key(query)
-                cached_result = self._get_cached_result(cache_key)
-                if cached_result:
-                    return cached_result
+            cypher_statements = self.schema_manager.generate_schema_cypher()
             
-            # Execute query
-            with self.driver.session(database=self.database) as session:
-                if query.read_only:
-                    result = session.run(query.cypher, query.parameters)
-                else:
-                    result = session.write_transaction(
-                        lambda tx: tx.run(query.cypher, query.parameters)
-                    )
-                
-                # Process results
-                records = []
-                for record in result:
-                    records.append(dict(record))
-                
-                summary = {
-                    'query_type': result.summary().query_type,
-                    'counters': dict(result.summary().counters),
-                    'notifications': [str(n) for n in result.summary().notifications]
-                }
-                
-                query_time = time.time() - start_time
-                
-                query_result = GraphQueryResult(
-                    records=records,
-                    summary=summary,
-                    query_time=query_time
-                )
-                
-                # Cache read-only results
-                if query.read_only:
-                    self._cache_result(cache_key, query_result)
-                
-                # Update metrics
-                self.query_count += 1
-                self.total_query_time += query_time
-                
-                return query_result
-                
+            for statement in cypher_statements:
+                query = GraphQuery(cypher=statement, read_only=False)
+                await self.execute_query(query)
+                self.logger.debug(f"Executed schema statement: {statement[:100]}...")
+            
+            self.logger.info("Multi-repository schema initialized successfully")
+            
         except Exception as e:
-            self.logger.error(f"Query execution failed: {e}")
+            self.logger.error(f"Failed to initialize multi-repository schema: {e}")
             raise
+    
+    async def execute_query(self, query: GraphQuery) -> GraphQueryResult:
+        """Execute a Cypher query with recovery on defunct/transient failures."""
+        start_time = time.time()
+        # Prepare cache early
+        cache_key = None
+        if query.read_only:
+            cache_key = self._generate_cache_key(query)
+            cached = self._get_cached_result(cache_key)
+            if cached:
+                return cached
+
+        attempts = 0
+        last_exc: Optional[Exception] = None
+
+        while attempts < 2:
+            try:
+                loop = asyncio.get_event_loop()
+                records, summary = await loop.run_in_executor(None, self._sync_execute_query, query)
+                qtime = time.time() - start_time
+                result = GraphQueryResult(records=records, summary=summary, query_time=qtime)
+                if query.read_only and cache_key:
+                    self._cache_result(cache_key, result)
+                self.query_count += 1
+                self.total_query_time += qtime
+                return result
+            except Exception as e:
+                last_exc = e
+                msg = str(e).lower()
+                is_defunct = ("defunct connection" in msg) or isinstance(e, ServiceUnavailable) or isinstance(e, TransientError)
+                self.logger.error(f"Neo4j execute_query failed (attempt {attempts+1}): {e}")
+                if is_defunct and attempts == 0:
+                    try:
+                        await self._reconnect_driver()
+                        attempts += 1
+                        continue
+                    except Exception as re:
+                        self.logger.error(f"Neo4j reconnect failed: {re}")
+                        break
+                break
+
+        raise last_exc if last_exc else RuntimeError("Neo4j execute_query failed without exception")
+    
+    def _sync_execute_query(self, query: GraphQuery):
+        """Synchronous query execution to run in thread pool."""
+        if self.driver is None:
+            raise RuntimeError("Neo4j driver is not initialized")
+        with self.driver.session(database=self.database) as session:
+            if query.read_only:
+                result = session.run(query.cypher, query.parameters)
+                records = [dict(record) for record in result]
+                result_summary = result.consume()
+                summary = {
+                    'query_type': result_summary.query_type,
+                    'counters': result_summary.counters,
+                    'notifications': [str(n) for n in (result_summary.notifications or [])]
+                }
+                return records, summary
+            else:
+                def write_work(tx: Transaction):
+                    result = tx.run(query.cypher, query.parameters)
+                    records = [dict(record) for record in result]
+                    result_summary = result.consume()
+                    summary = {
+                        'query_type': result_summary.query_type,
+                        'counters': result_summary.counters,
+                        'notifications': [str(n) for n in (result_summary.notifications or [])]
+                    }
+                    return records, summary
+                records, summary = session.write_transaction(write_work)
+                return records, summary
     
     def _generate_cache_key(self, query: GraphQuery) -> str:
         """Generate cache key for query."""
@@ -648,25 +704,20 @@ class Neo4jClient:
         query = GraphQuery(
             cypher="""
             MATCH (n)
-            RETURN 
+            RETURN
                 labels(n) as labels,
                 count(*) as count
             ORDER BY count DESC
             """,
             read_only=True
         )
-        
         result = await self.execute_query(query)
-        
-        # Process node counts
-        node_counts = {}
+        node_counts: Dict[str, int] = {}
         for record in result.records:
             labels = record['labels']
             count = record['count']
             for label in labels:
                 node_counts[label] = node_counts.get(label, 0) + count
-        
-        # Get relationship counts
         rel_query = GraphQuery(
             cypher="""
             MATCH ()-[r]->()
@@ -675,10 +726,10 @@ class Neo4jClient:
             """,
             read_only=True
         )
-        
         rel_result = await self.execute_query(rel_query)
-        relationship_counts = {record['relationship_type']: record['count'] for record in rel_result.records}
-        
+        relationship_counts = {
+            record['relationship_type']: record['count'] for record in rel_result.records
+        }
         return {
             'node_counts': node_counts,
             'relationship_counts': relationship_counts,
@@ -687,50 +738,523 @@ class Neo4jClient:
             'performance_metrics': {
                 'total_queries': self.query_count,
                 'average_query_time': self.total_query_time / max(self.query_count, 1),
-                'cache_size': len(self.query_cache)
-            }
+                'cache_size': len(self.query_cache),
+            },
         }
     
     async def health_check(self) -> Dict[str, Any]:
-        """Perform health check on Neo4j database."""
-        health = {
-            'status': 'healthy',
-            'timestamp': time.time(),
-            'checks': {}
-        }
-        
-        try:
-            # Check basic connectivity
-            query = GraphQuery(cypher="RETURN 1 as test", read_only=True)
-            result = await self.execute_query(query)
-            
-            if result.records and result.records[0]['test'] == 1:
-                health['checks']['connectivity'] = {'status': 'pass'}
-            else:
+        """Perform health check with retry/reconnect on transient failures."""
+        async def _probe() -> Dict[str, Any]:
+            health = {'status': 'healthy', 'checks': {}}
+            # Connectivity
+            r = await self.execute_query(GraphQuery(cypher="RETURN 1 as test", read_only=True))
+            if not (r.records and r.records[0].get('test') == 1):
                 health['checks']['connectivity'] = {'status': 'fail'}
                 health['status'] = 'unhealthy'
-            
-            # Check query performance
-            start_time = time.time()
-            perf_query = GraphQuery(
-                cypher="MATCH (n) RETURN count(n) as total_nodes LIMIT 1",
-                read_only=True
-            )
-            await self.execute_query(perf_query)
-            query_time = time.time() - start_time
-            
+            else:
+                health['checks']['connectivity'] = {'status': 'pass'}
+            # Perf
+            t0 = time.time()
+            pr = await self.execute_query(GraphQuery(cypher="MATCH (n) RETURN count(n) as total_nodes LIMIT 1", read_only=True))
+            qtime = time.time() - t0
+            total_nodes = int(pr.records[0].get('total_nodes', 0)) if pr.records else 0
             health['checks']['query_performance'] = {
-                'status': 'pass' if query_time < 1.0 else 'warn',
-                'query_time': query_time
+                'status': 'pass' if qtime < 1.0 else 'warn',
+                'query_time': qtime,
+                'total_nodes_sample': total_nodes
             }
+            # Version info (best-effort)
+            try:
+                vr = await self.execute_query(GraphQuery(
+                    cypher="CALL dbms.components() YIELD name, versions RETURN name, versions LIMIT 1",
+                    read_only=True
+                ))
+                if vr.records:
+                    rec = vr.records[0]
+                    health['checks']['version'] = {
+                        "name": rec.get("name"),
+                        "version": (rec.get("versions") or [None])[0]
+                    }
+            except Exception as ver_e:
+                health['checks']['version'] = {"error": str(ver_e)}
+            return health
+
+        try:
+            h = await _probe()
+            if h.get('status') == 'healthy':
+                h['timestamp'] = time.time()
+                return h
+            # One reconnect + re-probe if unhealthy
+            await self._reconnect_driver()
+            h2 = await _probe()
+            h2['timestamp'] = time.time()
+            return h2
+        except Exception as e:
+            # As a last resort, try reconnect once more and re-probe
+            msg = str(e).lower()
+            if ("defunct connection" in msg) or isinstance(e, ServiceUnavailable) or isinstance(e, TransientError):
+                try:
+                    await self._reconnect_driver()
+                    h3 = await _probe()
+                    h3['timestamp'] = time.time()
+                    return h3
+                except Exception as e2:
+                    self.logger.error(f"Neo4j health reconnection failed: {e2}")
+            self.logger.error(f"Health check failed: {e}")
+            return {'status': 'unhealthy', 'timestamp': time.time(), 'error': str(e), 'checks': {}}
+    
+    # =========================
+    # Database-aware operations
+    # =========================
+    async def count_tables(self, repositories: List[str]) -> int:
+        """
+        Strict count of Table nodes associated to provided repositories.
+        Requires repo→DB linkage via READS_FROM/WRITES_TO/CONTAINS edges.
+        """
+        if not repositories:
+            raise ValueError("count_tables requires at least one repository")
+        cypher = """
+        UNWIND $repos as repoName
+        MATCH (r:Repository {name: repoName})
+        OPTIONAL MATCH (r)-[:READS_FROM|WRITES_TO]->(t:Table)
+        WITH r, collect(DISTINCT t) as t1
+        OPTIONAL MATCH (r)-[:CONTAINS]->(:Schema)-[:CONTAINS]->(t2:Table)
+        WITH t1 + collect(DISTINCT t2) as allTables
+        WITH [x IN allTables WHERE x IS NOT NULL] as tbls
+        RETURN size(apoc.coll.toSet(tbls)) as total
+        """
+        query = GraphQuery(cypher=cypher, parameters={'repos': repositories})
+        result = await self.execute_query(query)
+        if not result.records:
+            raise RuntimeError("count_tables failed to retrieve results")
+        return int(result.records[0]['total'])
+    
+    async def count_views(self, repositories: List[str]) -> int:
+        """Strict count of View nodes for the given repositories."""
+        if not repositories:
+            raise ValueError("count_views requires at least one repository")
+        cypher = """
+        UNWIND $repos as repoName
+        MATCH (r:Repository {name: repoName})
+        OPTIONAL MATCH (r)-[:READS_FROM]->(v:View)
+        OPTIONAL MATCH (r)-[:CONTAINS]->(:Schema)-[:CONTAINS]->(v2:View)
+        WITH collect(DISTINCT v) + collect(DISTINCT v2) as vs
+        WITH [x IN vs WHERE x IS NOT NULL] as views
+        RETURN size(apoc.coll.toSet(views)) as total
+        """
+        query = GraphQuery(cypher=cypher, parameters={'repos': repositories})
+        result = await self.execute_query(query)
+        if not result.records:
+            raise RuntimeError("count_views failed to retrieve results")
+        return int(result.records[0]['total'])
+    
+    async def count_procedures(self, repositories: List[str]) -> int:
+        """Strict count of Procedure nodes for the given repositories."""
+        if not repositories:
+            raise ValueError("count_procedures requires at least one repository")
+        cypher = """
+        UNWIND $repos as repoName
+        MATCH (r:Repository {name: repoName})
+        OPTIONAL MATCH (r)-[:CALLS_DB_PROC]->(p:Procedure)
+        OPTIONAL MATCH (r)-[:CONTAINS]->(:Schema)-[:CONTAINS]->(p2:Procedure)
+        WITH collect(DISTINCT p) + collect(DISTINCT p2) as ps
+        WITH [x IN ps WHERE x IS NOT NULL] as procs
+        RETURN size(apoc.coll.toSet(procs)) as total
+        """
+        query = GraphQuery(cypher=cypher, parameters={'repos': repositories})
+        result = await self.execute_query(query)
+        if not result.records:
+            raise RuntimeError("count_procedures failed to retrieve results")
+        return int(result.records[0]['total'])
+    
+    async def count_triggers(self, repositories: List[str]) -> int:
+        """Strict count of Trigger nodes attached to tables for the given repositories."""
+        if not repositories:
+            raise ValueError("count_triggers requires at least one repository")
+        cypher = """
+        UNWIND $repos as repoName
+        MATCH (r:Repository {name: repoName})
+        OPTIONAL MATCH (r)-[:CONTAINS]->(:Schema)-[:CONTAINS]->(:Table)<-[:ATTACHED_TO]-(t:Trigger)
+        WITH collect(DISTINCT t) as ts
+        WITH [x IN ts WHERE x IS NOT NULL] as triggers
+        RETURN size(apoc.coll.toSet(triggers)) as total
+        """
+        query = GraphQuery(cypher=cypher, parameters={'repos': repositories})
+        result = await self.execute_query(query)
+        if not result.records:
+            raise RuntimeError("count_triggers failed to retrieve results")
+        return int(result.records[0]['total'])
+    
+    async def find_shared_db_artifacts(self, repositories: List[str]) -> List[Dict[str, Any]]:
+        """
+        Find DB artifacts (tables/views) used by more than one repository in the set.
+        """
+        if not repositories:
+            raise ValueError("find_shared_db_artifacts requires at least one repository")
+        cypher = """
+        UNWIND $repos as repoName
+        MATCH (r:Repository {name: repoName})
+        OPTIONAL MATCH (r)-[:READS_FROM|WRITES_TO]->(obj:Table)
+        WITH obj, collect(DISTINCT r.name) as reposUsed
+        WHERE size(reposUsed) > 1 AND obj IS NOT NULL
+        RETURN obj.name as artifact, reposUsed as repos, 'Table' as type
+        UNION
+        UNWIND $repos as repoName
+        MATCH (r:Repository {name: repoName})
+        OPTIONAL MATCH (r)-[:READS_FROM]->(obj:View)
+        WITH obj, collect(DISTINCT r.name) as reposUsed
+        WHERE size(reposUsed) > 1 AND obj IS NOT NULL
+        RETURN obj.name as artifact, reposUsed as repos, 'View' as type
+        ORDER BY artifact
+        """
+        query = GraphQuery(cypher=cypher, parameters={'repos': repositories})
+        result = await self.execute_query(query)
+        return result.records
+     
+    async def upsert_db_objects(self, payload: Dict[str, Any]) -> None:
+         """
+         Upsert Database/Schema/Table/View/Column/Procedure/Function/Package/Trigger and relationships.
+         Strict mode: any failure raises; no partial silent success.
+         Expected payload keys: database, schemas, tables, views, procedures, functions, packages, triggers, fks
+         """
+         start = time.time()
+         try:
+             # Upsert Database
+             db = payload.get('database')
+             if not db or 'name' not in db:
+                 raise ValueError("payload.database with name is required")
+             q_db = GraphQuery(
+                 cypher="""
+                 MERGE (d:Database {name: $name})
+                 SET d += apoc.map.clean($props, [], [NULL])
+                 """,
+                 parameters={'name': db['name'], 'props': {k: v for k, v in db.items() if k != 'name'}},
+                 read_only=False
+             )
+             await self.execute_query(q_db)
+             
+             # Upsert Schemas
+             schemas = payload.get('schemas', [])
+             if schemas:
+                 q_schema = GraphQuery(
+                     cypher="""
+                     UNWIND $schemas as s
+                     MATCH (d:Database {name: $db})
+                     MERGE (sc:Schema {name: s.name})
+                     SET sc.owner = s.owner
+                     MERGE (d)-[:CONTAINS]->(sc)
+                     """,
+                     parameters={'db': db['name'], 'schemas': schemas},
+                     read_only=False
+                 )
+                 await self.execute_query(q_schema)
+             
+             # Upsert Tables and Columns
+             tables = payload.get('tables', [])
+             if tables:
+                 q_tables = GraphQuery(
+                     cypher="""
+                     UNWIND $tables as t
+                     MATCH (sc:Schema {name: t.schema})
+                     MERGE (tb:Table {name: t.name})
+                     SET tb.pk = t.pk, tb.row_count = t.row_count, tb.last_analyzed = t.last_analyzed
+                     MERGE (sc)-[:CONTAINS]->(tb)
+                     
+                     WITH t, tb
+                     UNWIND coalesce(t.columns, []) as col
+                     MERGE (c:Column {name: col.name})
+                     SET c.data_type = col.data_type,
+                         c.nullable = col.nullable,
+                         c.default = col.default,
+                         c.sensitive = col.sensitive,
+                         c.comment = col.comment
+                     MERGE (tb)-[:CONTAINS]->(c)
+                     """,
+                     parameters={'tables': tables},
+                     read_only=False
+                 )
+                 await self.execute_query(q_tables)
+             
+             # Upsert Views
+             views = payload.get('views', [])
+             if views:
+                 q_views = GraphQuery(
+                     cypher="""
+                     UNWIND $views as v
+                     MATCH (sc:Schema {name: v.schema})
+                     MERGE (vw:View {name: v.name})
+                     SET vw.definition_hash = v.definition_hash
+                     MERGE (sc)-[:CONTAINS]->(vw)
+                     WITH v, vw
+                     UNWIND coalesce(v.derives_from, []) as base
+                     MATCH (t:Table {name: base}) OR (t:View {name: base})
+                     MERGE (vw)-[:DERIVES_FROM]->(t)
+                     """,
+                     parameters={'views': views},
+                     read_only=False
+                 )
+                 await self.execute_query(q_views)
+             
+             # Upsert Procedures / Functions / Packages
+             procs = payload.get('procedures', [])
+             if procs:
+                 q_procs = GraphQuery(
+                     cypher="""
+                     UNWIND $procedures as p
+                     MATCH (sc:Schema {name: p.schema})
+                     MERGE (pr:Procedure {name: p.name})
+                     SET pr.language = p.language,
+                         pr.deterministic = p.deterministic,
+                         pr.authz_enforced = p.authz_enforced
+                     MERGE (sc)-[:CONTAINS]->(pr)
+                     """,
+                     parameters={'procedures': procs},
+                     read_only=False
+                 )
+                 await self.execute_query(q_procs)
+             
+             funcs = payload.get('functions', [])
+             if funcs:
+                 q_funcs = GraphQuery(
+                     cypher="""
+                     UNWIND $functions as f
+                     MATCH (sc:Schema {name: f.schema})
+                     MERGE (fn:Function {name: f.name})
+                     SET fn.language = f.language,
+                         fn.deterministic = f.deterministic
+                     MERGE (sc)-[:CONTAINS]->(fn)
+                     """,
+                     parameters={'functions': funcs},
+                     read_only=False
+                 )
+                 await self.execute_query(q_funcs)
+             
+             packages = payload.get('packages', [])
+             if packages:
+                 q_pkgs = GraphQuery(
+                     cypher="""
+                     UNWIND $packages as p
+                     MATCH (sc:Schema {name: p.schema})
+                     MERGE (pkg:Package {name: p.name})
+                     MERGE (sc)-[:CONTAINS]->(pkg)
+                     """,
+                     parameters={'packages': packages},
+                     read_only=False
+                 )
+                 await self.execute_query(q_pkgs)
+             
+             # Upsert Triggers
+             triggers = payload.get('triggers', [])
+             if triggers:
+                 q_trg = GraphQuery(
+                     cypher="""
+                     UNWIND $triggers as t
+                     MATCH (sc:Schema {name: t.schema})-[:CONTAINS]->(tb:Table {name: t.table})
+                     MERGE (tr:Trigger {name: t.name})
+                     SET tr.event = t.event, tr.timing = t.timing, tr.enabled = coalesce(t.enabled, true)
+                     MERGE (tr)-[:ATTACHED_TO]->(tb)
+                     """,
+                     parameters={'triggers': triggers},
+                     read_only=False
+                 )
+                 await self.execute_query(q_trg)
+             
+             # Foreign Keys
+             fks = payload.get('fks', [])
+             if fks:
+                 q_fk = GraphQuery(
+                     cypher="""
+                     UNWIND $fks as fk
+                     MATCH (src:Table {name: fk.source})
+                     MATCH (tgt:Table {name: fk.target})
+                     MERGE (src)-[:FK_REF]->(tgt)
+                     """,
+                     parameters={'fks': fks},
+                     read_only=False
+                 )
+                 await self.execute_query(q_fk)
+             
+             self.logger.info("DB objects upsert completed", extra={'elapsed_ms': int((time.time() - start) * 1000)})
+         
+         except Exception as e:
+             self.logger.error(f"DB objects upsert failed: {e}")
+             raise
+
+    # Multi-repository operations
+
+    async def create_enhanced_repository_node(self, metadata: RepositoryMetadata) -> bool:
+        """Create repository node with enhanced multi-repo metadata."""
+        try:
+            cypher = self.schema_manager.create_repository_node_cypher(metadata)
+            query = GraphQuery(
+                cypher=cypher,
+                parameters={
+                    'name': metadata.name,
+                    'url': metadata.url,
+                    'language': metadata.language,
+                    'framework': metadata.framework,
+                    'business_domains': metadata.business_domains,
+                    'size_loc': metadata.size_loc,
+                    'complexity_score': metadata.complexity_score,
+                    'last_modified': metadata.last_modified,
+                    'team_owner': metadata.team_owner,
+                    'deployment_environment': metadata.deployment_environment,
+                    'depends_on_repos': metadata.depends_on_repos,
+                    'provides_services': metadata.provides_services,
+                    'consumes_services': metadata.consumes_services,
+                    'shared_artifacts': metadata.shared_artifacts
+                },
+                read_only=False
+            )
+            
+            await self.execute_query(query)
+            self.logger.info(f"Created enhanced repository node: {metadata.name}")
+            return True
             
         except Exception as e:
-            health['status'] = 'unhealthy'
-            health['error'] = str(e)
-            self.logger.error(f"Health check failed: {e}")
-        
-        return health
+            self.logger.error(f"Failed to create enhanced repository node: {e}")
+            return False
+     
+    async def create_business_operation_node(self, metadata: BusinessOperationMetadata) -> bool:
+        """Create business operation node."""
+        try:
+            cypher = self.schema_manager.create_business_operation_cypher(metadata)
+            query = GraphQuery(
+                cypher=cypher,
+                parameters={
+                    'name': metadata.name,
+                    'business_domain': metadata.business_domain,
+                    'operation_type': metadata.operation_type,
+                    'customer_facing': metadata.customer_facing,
+                    'financial_impact': metadata.financial_impact,
+                    'data_sensitivity': metadata.data_sensitivity,
+                    'implementing_repositories': metadata.implementing_repositories,
+                    'coordinating_operations': metadata.coordinating_operations,
+                    'migration_complexity': metadata.migration_complexity,
+                    'migration_priority': metadata.migration_priority
+                },
+                read_only=False
+            )
+            
+            await self.execute_query(query)
+            self.logger.info(f"Created business operation node: {metadata.name}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create business operation node: {e}")
+            return False
     
+    async def create_business_flow_node(self, metadata: BusinessFlowMetadata) -> bool:
+        """Create business flow node spanning repositories."""
+        try:
+            cypher = self.schema_manager.create_business_flow_cypher(metadata)
+            query = GraphQuery(
+                cypher=cypher,
+                parameters={
+                    'name': metadata.name,
+                    'description': metadata.description,
+                    'flow_type': metadata.flow_type,
+                    'repositories_involved': metadata.repositories_involved,
+                    'business_value': metadata.business_value,
+                    'user_impact': metadata.user_impact,
+                    'compliance_requirements': metadata.compliance_requirements,
+                    'migration_order': metadata.migration_order,
+                    'estimated_effort_weeks': metadata.estimated_effort_weeks,
+                    'risk_level': metadata.risk_level,
+                    'dependencies': metadata.dependencies
+                },
+                read_only=False
+            )
+            
+            await self.execute_query(query)
+            self.logger.info(f"Created business flow node: {metadata.name}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create business flow node: {e}")
+            return False
+    
+    async def create_cross_repository_relationship(self, 
+                                                 source_repo: str, 
+                                                 target_repo: str,
+                                                 relationship_type: RelationshipType,
+                                                 properties: Dict[str, Any]) -> bool:
+        """Create cross-repository relationship."""
+        try:
+            cypher = self.schema_manager.create_cross_repo_relationship_cypher(
+                source_repo, target_repo, relationship_type, properties
+            )
+            
+            params = {
+                'source_repo': source_repo,
+                'target_repo': target_repo,
+                **properties
+            }
+            
+            query = GraphQuery(cypher=cypher, parameters=params, read_only=False)
+            await self.execute_query(query)
+            self.logger.info(f"Created cross-repo relationship: {source_repo} -> {target_repo}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create cross-repo relationship: {e}")
+            return False
+    
+    async def find_business_flows_for_repositories(self, repository_names: List[str]) -> List[Dict[str, Any]]:
+        """Find business flows that involve the specified repositories."""
+        queries = self.schema_manager.get_cross_repo_analysis_queries()
+        query = GraphQuery(
+            cypher=queries['find_business_flows_for_repos'],
+            parameters={'repository_names': repository_names}
+        )
+        
+        result = await self.execute_query(query)
+        return result.records
+    
+    async def find_cross_repository_dependencies(self, repository_names: List[str]) -> List[Dict[str, Any]]:
+        """Find dependencies between repositories."""
+        queries = self.schema_manager.get_cross_repo_analysis_queries()
+        query = GraphQuery(
+            cypher=queries['find_cross_repo_dependencies'],
+            parameters={'repository_names': repository_names}
+        )
+        
+        result = await self.execute_query(query)
+        return result.records
+    
+    async def find_shared_business_operations(self, repository_names: List[str]) -> List[Dict[str, Any]]:
+        """Find business operations implemented across multiple repositories."""
+        queries = self.schema_manager.get_cross_repo_analysis_queries()
+        query = GraphQuery(
+            cypher=queries['find_shared_business_operations'],
+            parameters={'repository_names': repository_names}
+        )
+        
+        result = await self.execute_query(query)
+        return result.records
+    
+    async def analyze_migration_impact(self, repository_names: List[str]) -> List[Dict[str, Any]]:
+        """Analyze migration impact across repositories."""
+        queries = self.schema_manager.get_cross_repo_analysis_queries()
+        query = GraphQuery(
+            cypher=queries['analyze_migration_impact'],
+            parameters={'repository_names': repository_names}
+        )
+        
+        result = await self.execute_query(query)
+        return result.records
+    
+    async def find_integration_points(self, repository_names: List[str]) -> List[Dict[str, Any]]:
+        """Find integration points for repositories."""
+        queries = self.schema_manager.get_cross_repo_analysis_queries()
+        query = GraphQuery(
+            cypher=queries['find_integration_points'],
+            parameters={'repository_names': repository_names}
+        )
+        
+        result = await self.execute_query(query)
+        return result.records
+
     async def close(self):
         """Close Neo4j driver and cleanup resources."""
         try:
@@ -747,105 +1271,22 @@ class Neo4jClient:
     
     @asynccontextmanager
     async def transaction(self):
-        """Context manager for Neo4j transactions."""
+        """Context manager for Neo4j transactions with recovery."""
+        if self.driver is None:
+            raise RuntimeError("Neo4j driver is not initialized")
         session = self.driver.session(database=self.database)
         tx = await session.begin_transaction()
-        
         try:
             yield tx
             await tx.commit()
         except Exception as e:
             await tx.rollback()
+            msg = str(e).lower()
+            if ("defunct connection" in msg) or isinstance(e, ServiceUnavailable) or isinstance(e, TransientError):
+                try:
+                    await self._reconnect_driver()
+                except Exception:
+                    pass
             raise
         finally:
             await session.close()
-
-
-# Utility functions for common graph operations
-
-async def find_shortest_path(client: Neo4jClient, 
-                           start_node: str, 
-                           end_node: str,
-                           relationship_type: str = None) -> List[Dict[str, Any]]:
-    """Find shortest path between two nodes."""
-    cypher = """
-    MATCH (start {id: $start_id}), (end {id: $end_id})
-    MATCH path = shortestPath((start)-[*]->(end))
-    """
-    
-    if relationship_type:
-        cypher = cypher.replace("[*]", f"[:{relationship_type}*]")
-    
-    cypher += """
-    RETURN path,
-           length(path) as path_length,
-           [node in nodes(path) | node.id] as node_ids,
-           [rel in relationships(path) | type(rel)] as relationship_types
-    """
-    
-    query = GraphQuery(
-        cypher=cypher,
-        parameters={'start_id': start_node, 'end_id': end_node}
-    )
-    
-    result = await client.execute_query(query)
-    return result.records
-
-
-async def find_influential_nodes(client: Neo4jClient, 
-                               node_label: str,
-                               relationship_type: str,
-                               limit: int = 10) -> List[Dict[str, Any]]:
-    """Find most influential nodes using PageRank algorithm."""
-    query = GraphQuery(
-        cypher="""
-        CALL gds.pageRank.stream({
-            nodeProjection: $node_label,
-            relationshipProjection: $relationship_type,
-            maxIterations: 20,
-            dampingFactor: 0.85
-        })
-        YIELD nodeId, score
-        RETURN gds.util.asNode(nodeId).id as node_id,
-               gds.util.asNode(nodeId).name as name,
-               score
-        ORDER BY score DESC
-        LIMIT $limit
-        """,
-        parameters={
-            'node_label': node_label,
-            'relationship_type': relationship_type,
-            'limit': limit
-        }
-    )
-    
-    result = await client.execute_query(query)
-    return result.records
-
-
-async def detect_communities(client: Neo4jClient,
-                           node_label: str,
-                           relationship_type: str) -> List[Dict[str, Any]]:
-    """Detect communities in the graph using Louvain algorithm."""
-    query = GraphQuery(
-        cypher="""
-        CALL gds.louvain.stream({
-            nodeProjection: $node_label,
-            relationshipProjection: $relationship_type,
-            maxIterations: 10,
-            tolerance: 0.0001
-        })
-        YIELD nodeId, communityId
-        RETURN communityId,
-               collect(gds.util.asNode(nodeId).id) as community_members,
-               count(*) as community_size
-        ORDER BY community_size DESC
-        """,
-        parameters={
-            'node_label': node_label,
-            'relationship_type': relationship_type
-        }
-    )
-    
-    result = await client.execute_query(query)
-    return result.records

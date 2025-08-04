@@ -5,32 +5,55 @@ import {
   ListItemIcon, Divider, IconButton, Tooltip
 } from '@mui/material';
 import {
-  Storage, Code, AccountTree, Timeline, Refresh, Error,
-  CheckCircle, Warning, FolderOpen, Search, Chat
+  Storage, Code, AccountTree, Timeline, Refresh,
+  CheckCircle, FolderOpen, Search, Chat, Business,
+  BugReport, Assessment
 } from '@mui/icons-material';
 import { ApiService } from '../services/ApiService';
+import SystemDiagnostics from './SystemDiagnostics';
+import SystemHealthOverview from './SystemHealthOverview';
+import { useSystemHealth } from '../context/SystemHealthContext';
 
-function Dashboard({ repositories, systemHealth, onRefresh }) {
+function Dashboard({ repositories }) {
   const [stats, setStats] = useState(null);
-  const [agentHealth, setAgentHealth] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [systemDiagnostics, setSystemDiagnostics] = useState(null);
+  const { isReady, isLoading: healthLoading, error: healthError, refresh } = useSystemHealth();
 
+  // Gate dashboard data by readiness to avoid premature calls
   useEffect(() => {
+    if (!isReady) return;
     loadDashboardData();
-  }, [repositories]);
+  }, [repositories, isReady]);
 
   const loadDashboardData = async () => {
-    if (repositories.length === 0) return;
-    
     try {
       setLoading(true);
-      const [statusData, agentData] = await Promise.all([
-        ApiService.getStatus(),
-        ApiService.getAgentHealth()
+      const [statusData, diagnosticsData] = await Promise.all([
+        ApiService.getSystemStatus(),
+        ApiService.getSystemDiagnostics(false, 10).catch(() => null)
       ]);
-      
+
       setStats(statusData);
-      setAgentHealth(agentData);
+
+      const normalized = diagnosticsData && typeof diagnosticsData === 'object'
+        ? {
+            health_score: typeof diagnosticsData.health_score === 'number'
+              ? diagnosticsData.health_score
+              : (typeof statusData?.health_score === 'number' ? statusData.health_score : 0),
+            overall_health:
+              (diagnosticsData.overall_health
+                || (statusData?.status === 'ready' ? 'healthy' : 'unhealthy')
+                || 'unknown'),
+            issues: Array.isArray(diagnosticsData.issues) ? diagnosticsData.issues : []
+          }
+        : {
+            health_score: typeof statusData?.health_score === 'number' ? statusData.health_score : 0,
+            overall_health: (statusData?.status === 'ready' ? 'healthy' : 'unhealthy'),
+            issues: []
+          };
+      setSystemDiagnostics(normalized);
     } catch (error) {
       console.error('Failed to load dashboard data:', error);
     } finally {
@@ -39,22 +62,35 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
   };
 
   const handleRefresh = () => {
-    onRefresh();
-    loadDashboardData();
+    // Centralized health refresh via context; safe optional chaining if not present
+    try { refresh?.(); } catch (_) {}
+    if (isReady) {
+      loadDashboardData();
+    }
   };
+
+  const readinessBanner = (!isReady || healthLoading || healthError) ? (
+    <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 3 }}>
+      {!isReady ? 'System is starting up. Dashboard metrics will appear once the system is ready.' :
+       healthLoading ? 'Checking system readiness...' :
+       `Health error: ${healthError}`}
+    </Alert>
+  ) : null;
 
   const renderSystemStatusCard = () => (
     <Card>
       <CardContent>
-        <Box display="flex" alignItems="center" justifyContent="between" mb={2}>
+        <Box display="flex" alignItems="center" justifyContent="space-between" mb={2}>
           <Typography variant="h6" display="flex" alignItems="center">
             <Storage sx={{ mr: 1 }} />
             System Status
           </Typography>
           <Tooltip title="Refresh">
-            <IconButton onClick={handleRefresh} size="small">
-              <Refresh />
-            </IconButton>
+            <span>
+              <IconButton onClick={handleRefresh} size="small" disabled={!isReady || loading}>
+                <Refresh />
+              </IconButton>
+            </span>
           </Tooltip>
         </Box>
         
@@ -85,30 +121,50 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
 
         <Divider sx={{ my: 2 }} />
 
-        <Box display="flex" flexWrap="wrap" gap={1}>
-          <Chip
-            icon={systemHealth?.status === 'healthy' ? <CheckCircle /> : <Error />}
-            label={`ChromaDB: ${systemHealth?.chromadb || 'Unknown'}`}
-            color={systemHealth?.status === 'healthy' ? 'success' : 'error'}
+        <SystemHealthOverview compact />
+
+        {systemDiagnostics && (
+          <Box mb={2} mt={2}>
+            <Box display="flex" alignItems="center" justifyContent="space-between" mb={1}>
+              <Typography variant="body2" color="text.secondary">
+                System Health Score
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {Math.round(systemDiagnostics.health_score)}/100
+              </Typography>
+            </Box>
+            <LinearProgress
+              variant="determinate"
+              value={systemDiagnostics.health_score}
+              color={systemDiagnostics.health_score >= 80 ? 'success' : systemDiagnostics.health_score >= 60 ? 'warning' : 'error'}
+              sx={{ height: 6, borderRadius: 3, mb: 1 }}
+            />
+            <Box display="flex" alignItems="center" justifyContent="space-between">
+              <Chip
+                label={(systemDiagnostics?.overall_health || 'unknown').toString().toUpperCase()}
+                color={systemDiagnostics.health_score >= 80 ? 'success' : systemDiagnostics.health_score >= 60 ? 'warning' : 'error'}
+                size="small"
+              />
+              <Button
+                size="small"
+                startIcon={<BugReport />}
+                onClick={() => setDiagnosticsOpen(true)}
+              >
+                Diagnostics
+              </Button>
+            </Box>
+          </Box>
+        )}
+
+        {systemDiagnostics?.issues && systemDiagnostics.issues.length > 0 && (
+          <Alert
+            severity={systemDiagnostics.issues.some(i => i.level === 'critical') ? 'error' : 'warning'}
             size="small"
-          />
-          {stats?.neo4j && (
-            <Chip
-              icon={<AccountTree />}
-              label={`Neo4j: ${stats.neo4j.total_repositories} repos`}
-              color="info"
-              size="small"
-            />
-          )}
-          {agentHealth && (
-            <Chip
-              icon={agentHealth.status === 'healthy' ? <CheckCircle /> : <Warning />}
-              label={`AI Agent: ${agentHealth.status}`}
-              color={agentHealth.status === 'healthy' ? 'success' : 'warning'}
-              size="small"
-            />
-          )}
-        </Box>
+            sx={{ mb: 1 }}
+          >
+            {systemDiagnostics.issues.length} system issue{systemDiagnostics.issues.length > 1 ? 's' : ''} detected
+          </Alert>
+        )}
       </CardContent>
     </Card>
   );
@@ -133,15 +189,19 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
                   <Code />
                 </ListItemIcon>
                 <ListItemText
-                  primary={repo}
-                  secondary={`Repository ${index + 1}`}
+                  primary={<Typography component="span">{repo.name || repo}</Typography>}
+                  secondary={
+                    <Typography component="span" variant="body2" color="text.secondary">
+                      {repo.status ? `Status: ${repo.status} | Files: ${repo.indexed_files || 0}` : `Repository ${index + 1}`}
+                    </Typography>
+                  }
                 />
               </ListItem>
             ))}
             {repositories.length > 5 && (
               <ListItem>
                 <ListItemText
-                  primary={`... and ${repositories.length - 5} more repositories`}
+                  primary={<Typography component="span">{`... and ${repositories.length - 5} more repositories`}</Typography>}
                   sx={{ fontStyle: 'italic', color: 'text.secondary' }}
                 />
               </ListItem>
@@ -174,7 +234,7 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
             startIcon={<Search />}
             href="/search"
             fullWidth
-            disabled={repositories.length === 0}
+            disabled={!isReady || repositories.length === 0}
           >
             Search Code
           </Button>
@@ -184,7 +244,7 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
             startIcon={<Chat />}
             href="/chat"
             fullWidth
-            disabled={repositories.length === 0}
+            disabled={!isReady || repositories.length === 0}
           >
             Ask AI Agent
           </Button>
@@ -194,9 +254,28 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
             startIcon={<AccountTree />}
             href="/graph"
             fullWidth
-            disabled={repositories.length === 0}
+            disabled={!isReady || repositories.length === 0}
           >
             View Dependencies
+          </Button>
+
+          <Button
+            variant="outlined"
+            startIcon={<Business />}
+            href="/multi-repo"
+            fullWidth
+            disabled={!isReady || repositories.length < 2}
+          >
+            Multi-Repo Analysis
+          </Button>
+          
+          <Button
+            variant="outlined"
+            startIcon={<Assessment />}
+            onClick={() => setDiagnosticsOpen(true)}
+            fullWidth
+          >
+            System Diagnostics
           </Button>
         </Box>
       </CardContent>
@@ -211,7 +290,7 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
           Analytics Overview
         </Typography>
         
-        {stats ? (
+        {isReady && stats ? (
           <Grid container spacing={2}>
             <Grid item xs={12} sm={6}>
               <Box textAlign="center" py={2}>
@@ -237,7 +316,7 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
           </Grid>
         ) : (
           <Alert severity="info">
-            Analytics available after indexing repositories
+            {isReady ? 'Analytics available after indexing repositories' : 'Waiting for system readiness...'}
           </Alert>
         )}
       </CardContent>
@@ -253,12 +332,7 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
         Welcome to Codebase RAG - your AI-powered legacy application analysis platform.
       </Typography>
 
-      {/* System Health Alert */}
-      {systemHealth?.status !== 'healthy' && (
-        <Alert severity="error" sx={{ mb: 3 }}>
-          System Health Issue: {systemHealth?.error || 'Components not responding properly'}
-        </Alert>
-      )}
+      {readinessBanner}
 
       <Grid container spacing={3}>
         {/* System Status */}
@@ -305,6 +379,12 @@ function Dashboard({ repositories, systemHealth, onRefresh }) {
           </Button>
         </Paper>
       )}
+
+      {/* System Diagnostics Dialog */}
+      <SystemDiagnostics
+        open={diagnosticsOpen}
+        onClose={() => setDiagnosticsOpen(false)}
+      />
     </Box>
   );
 }

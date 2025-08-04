@@ -1,0 +1,37 @@
+# Development and Testing Dependencies
+# Install with: pip install -r requirements.txt -r requirements-dev.txt
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+
+# Code formatting and linting
+black==23.11.0
+isort==5.12.0
+flake8==6.1.0
+mypy==1.7.1
+
+# Development tools
+pre-commit==3.6.0
+coverage==7.3.2
+
+# Performance profiling
+memory-profiler==0.61.0
+
+# Additional validation for development
+marshmallow==3.20.1
+
+# Build tools (if needed)
+cython==3.0.6
+
+# Alternative graph library for experimentation
+igraph==0.11.2
+
+# Alternative git library for experimentation
+dulwich==0.21.7
+
+# Legacy Neo4j drivers (for migration/compatibility testing)
+py2neo==2021.2.4
+# Note: neomodel has version conflict with newer neo4j driver - keeping for compatibility testing only
+# neomodel==5.2.1

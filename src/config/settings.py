@@ -4,7 +4,8 @@ Application settings and configuration management.
 
 import os
 from typing import Optional, List
-from pydantic import BaseSettings, Field
+from pydantic_settings import BaseSettings
+from pydantic import Field
 from enum import Enum
 
 
@@ -40,7 +41,7 @@ class Settings(BaseSettings):
     # Neo4j settings
     neo4j_uri: str = Field(default="bolt://localhost:7687", description="Neo4j URI")
     neo4j_username: str = Field(default="neo4j", description="Neo4j username")
-    neo4j_password: str = Field(default="password", description="Neo4j password")
+    neo4j_password: str = Field(default="codebase-rag-2024", description="Neo4j password")
     neo4j_database: str = Field(default="neo4j", description="Neo4j database name")
     
     # Redis settings
@@ -57,8 +58,8 @@ class Settings(BaseSettings):
     minio_secure: bool = Field(default=False, description="MinIO secure connection")
     
     # Embedding settings
-    embedding_model: str = Field(default="sentence-transformers/all-MiniLM-L6-v2", description="Embedding model")
-    embedding_dimension: int = Field(default=384, description="Embedding dimension")
+    embedding_model: str = Field(default="microsoft/codebert-base", description="Embedding model")
+    embedding_dimension: int = Field(default=768, description="Embedding dimension")
     embedding_device: str = Field(default="cpu", description="Embedding device")
     
     # Processing settings
@@ -111,80 +112,23 @@ class Settings(BaseSettings):
     # Performance settings
     query_timeout: int = Field(default=30, description="Query timeout in seconds")
     connection_pool_size: int = Field(default=10, description="Connection pool size")
+
+    # --- New: Bedrock / LLM configuration ---
+    bedrock_model_id: Optional[str] = Field(default=None, description="AWS Bedrock model id", alias="BEDROCK_MODEL_ID")
+    aws_region: Optional[str] = Field(default=None, description="AWS region for Bedrock", alias="AWS_REGION")
+    aws_profile: Optional[str] = Field(default=None, description="AWS profile name", alias="AWS_PROFILE")
+    aws_access_key_id: Optional[str] = Field(default=None, description="AWS access key id", alias="AWS_ACCESS_KEY_ID")
+    aws_secret_access_key: Optional[str] = Field(default=None, description="AWS secret access key", alias="AWS_SECRET_ACCESS_KEY")
+    llm_max_input_tokens: int = Field(default=8000, description="Max input tokens for LLM", alias="LLM_MAX_INPUT_TOKENS")
+    llm_max_output_tokens: int = Field(default=1024, description="Max output tokens for LLM", alias="LLM_MAX_OUTPUT_TOKENS")
+    llm_request_timeout_seconds: float = Field(default=30.0, description="LLM request timeout (seconds)", alias="LLM_REQUEST_TIMEOUT_SECONDS")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
-        
-        # Environment variable mappings
-        fields = {
-            "app_name": {"env": "APP_NAME"},
-            "app_env": {"env": "APP_ENV"},
-            "debug": {"env": "DEBUG"},
-            "log_level": {"env": "LOG_LEVEL"},
-            
-            "api_host": {"env": "API_HOST"},
-            "api_port": {"env": "API_PORT"},
-            "api_workers": {"env": "API_WORKERS"},
-            
-            "chroma_host": {"env": "CHROMA_HOST"},
-            "chroma_port": {"env": "CHROMA_PORT"},
-            "chroma_collection_name": {"env": "CHROMA_COLLECTION_NAME"},
-            "chroma_persist_directory": {"env": "CHROMA_PERSIST_DIRECTORY"},
-            
-            "neo4j_uri": {"env": "NEO4J_URI"},
-            "neo4j_username": {"env": "NEO4J_USERNAME"},
-            "neo4j_password": {"env": "NEO4J_PASSWORD"},
-            "neo4j_database": {"env": "NEO4J_DATABASE"},
-            
-            "redis_url": {"env": "REDIS_URL"},
-            "redis_password": {"env": "REDIS_PASSWORD"},
-            
-            "postgres_url": {"env": "POSTGRES_URL"},
-            
-            "minio_endpoint": {"env": "MINIO_ENDPOINT"},
-            "minio_access_key": {"env": "MINIO_ACCESS_KEY"},
-            "minio_secret_key": {"env": "MINIO_SECRET_KEY"},
-            "minio_secure": {"env": "MINIO_SECURE"},
-            
-            "embedding_model": {"env": "EMBEDDING_MODEL"},
-            "embedding_dimension": {"env": "EMBEDDING_DIMENSION"},
-            "embedding_device": {"env": "EMBEDDING_DEVICE"},
-            
-            "max_concurrent_repos": {"env": "MAX_CONCURRENT_REPOS"},
-            "max_workers": {"env": "MAX_WORKERS"},
-            "batch_size": {"env": "BATCH_SIZE"},
-            "timeout_seconds": {"env": "TIMEOUT_SECONDS"},
-            
-            "max_chunk_size": {"env": "MAX_CHUNK_SIZE"},
-            "min_chunk_size": {"env": "MIN_CHUNK_SIZE"},
-            "overlap_size": {"env": "OVERLAP_SIZE"},
-            
-            "maven_enabled": {"env": "MAVEN_ENABLED"},
-            "maven_resolution_strategy": {"env": "MAVEN_RESOLUTION_STRATEGY"},
-            "maven_include_test_dependencies": {"env": "MAVEN_INCLUDE_TEST_DEPENDENCIES"},
-            
-            "auth_enabled": {"env": "AUTH_ENABLED"},
-            "jwt_secret_key": {"env": "JWT_SECRET_KEY"},
-            "jwt_algorithm": {"env": "JWT_ALGORITHM"},
-            "jwt_expiration_hours": {"env": "JWT_EXPIRATION_HOURS"},
-            
-            "prometheus_enabled": {"env": "PROMETHEUS_ENABLED"},
-            "prometheus_port": {"env": "PROMETHEUS_PORT"},
-            "jaeger_enabled": {"env": "JAEGER_ENABLED"},
-            "jaeger_endpoint": {"env": "JAEGER_ENDPOINT"},
-            
-            "max_file_size": {"env": "MAX_FILE_SIZE"},
-            "workspace_dir": {"env": "WORKSPACE_DIR"},
-            "git_timeout": {"env": "GIT_TIMEOUT"},
-            
-            "cache_ttl": {"env": "CACHE_TTL"},
-            "cache_size": {"env": "CACHE_SIZE"},
-            
-            "query_timeout": {"env": "QUERY_TIMEOUT"},
-            "connection_pool_size": {"env": "CONNECTION_POOL_SIZE"}
-        }
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": False,
+        "extra": "ignore"
+    }
     
     def is_production(self) -> bool:
         """Check if running in production environment."""

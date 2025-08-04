@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Link, useLocation } from 'react-router-dom';
 import {
-  AppBar, Toolbar, Typography, Container, Box, Drawer, List, ListItem,
-  ListItemButton, ListItemIcon, ListItemText, CssBaseline, Paper,
+  AppBar, Toolbar, Typography, Box, Drawer, List, ListItem,
+  ListItemButton, ListItemIcon, ListItemText, CssBaseline,
   Alert, CircularProgress, Chip
 } from '@mui/material';
 import {
   Dashboard, Search, Chat, AccountTree, FolderOpen, Assessment,
-  Home, Storage, Code
+  Storage, Code, Business
 } from '@mui/icons-material';
 
 import DashboardComponent from './components/Dashboard';
@@ -17,7 +17,12 @@ import RepositoryBrowser from './components/RepositoryBrowser';
 import DependencyGraph from './components/DependencyGraph';
 import MigrationPlanner from './components/MigrationPlanner';
 import RepositoryIndexer from './components/RepositoryIndexer';
+import MultiRepoAnalysis from './components/MultiRepoAnalysis';
+// Replace legacy SystemStatusDashboard import with SystemHealthOverview page if the former doesn't exist
+// If SystemStatusDashboard exists elsewhere, adjust the import accordingly.
+import SystemHealthOverview from './components/SystemHealthOverview';
 import { ApiService } from './services/ApiService';
+import { useSystemHealth } from './context/SystemHealthContext';
 
 const drawerWidth = 240;
 
@@ -29,78 +34,122 @@ const navigationItems = [
   { text: 'AI Chat', icon: <Chat />, path: '/chat', component: 'ChatInterface' },
   { text: 'Repository Browser', icon: <Code />, path: '/browse', component: 'RepositoryBrowser' },
   { text: 'Dependency Graph', icon: <AccountTree />, path: '/graph', component: 'DependencyGraph' },
-  { text: 'Migration Planner', icon: <Assessment />, path: '/migrate', component: 'MigrationPlanner' }
+  { text: 'Multi-Repo Analysis', icon: <Business />, path: '/multi-repo', component: 'MultiRepoAnalysis' },
+  { text: 'Migration Planner', icon: <Assessment />, path: '/migrate', component: 'MigrationPlanner' },
+  // Route label kept as System Status but routes to SystemHealthOverview
+  { text: 'System Status', icon: <Storage />, path: '/status', component: 'SystemHealthOverview' }
 ];
 
-// Component to render based on current route
+// Simple route renderer (kept without React Router v6 Routes to minimize churn)
+function RouteRenderer({ path, children }) {
+  const location = useLocation();
+  return location.pathname === path ? children : null;
+}
+
+// Component to render based on current route with readiness gating
 function AppContent() {
   const location = useLocation();
-  const [systemHealth, setSystemHealth] = useState(null);
+  const { data: healthData, isReady, isLoading: healthLoading, error: healthError, refresh } = useSystemHealth();
   const [repositories, setRepositories] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loadingRepos, setLoadingRepos] = useState(false);
+  const [repoError, setRepoError] = useState('');
 
-  // Load system health and repositories on mount
+  // Fetch repositories only when system is ready
   useEffect(() => {
-    loadSystemStatus();
-  }, []);
+    let ignore = false;
+    const loadRepos = async () => {
+      if (!isReady) return;
+      setLoadingRepos(true);
+      setRepoError('');
+      try {
+        const reposData = await ApiService.getRepositories();
+        if (!ignore) {
+          setRepositories(reposData.repositories || []);
+        }
+      } catch (e) {
+        if (!ignore) setRepoError(e.message || 'Failed to load repositories');
+      } finally {
+        if (!ignore) setLoadingRepos(false);
+      }
+    };
+    loadRepos();
+    return () => {
+      ignore = true;
+    };
+  }, [isReady]);
 
-  const loadSystemStatus = async () => {
-    try {
-      setLoading(true);
-      const [healthData, reposData] = await Promise.all([
-        ApiService.getHealth(),
-        ApiService.getRepositories()
-      ]);
-      
-      setSystemHealth(healthData);
-      setRepositories(reposData.repositories || []);
-    } catch (error) {
-      console.error('Failed to load system status:', error);
-      setSystemHealth({ status: 'unhealthy', error: error.message });
-    } finally {
-      setLoading(false);
-    }
+  const systemHealth = undefined; // eliminate legacy prop usage; components use context directly
+
+  const commonProps = {
+    repositories
   };
 
-  const renderCurrentComponent = () => {
-    const currentPath = location.pathname;
-    const currentNav = navigationItems.find(item => item.path === currentPath);
-    
-    if (!currentNav) {
-      return <DashboardComponent repositories={repositories} systemHealth={systemHealth} onRefresh={loadSystemStatus} />;
+  const renderBody = () => {
+    // Health loading gate
+    if (healthLoading && !healthData) {
+      return (
+        <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
+          <CircularProgress />
+        </Box>
+      );
     }
 
-    const commonProps = {
-      repositories,
-      systemHealth,
-      onRefresh: loadSystemStatus
-    };
-
-    switch (currentNav.component) {
-      case 'Dashboard':
-        return <DashboardComponent {...commonProps} />;
-      case 'RepositoryIndexer':
-        return <RepositoryIndexer {...commonProps} />;
-      case 'SearchInterface':
-        return <SearchInterface {...commonProps} />;
-      case 'ChatInterface':
-        return <ChatInterface {...commonProps} />;
-      case 'RepositoryBrowser':
-        return <RepositoryBrowser {...commonProps} />;
-      case 'DependencyGraph':
-        return <DependencyGraph {...commonProps} />;
-      case 'MigrationPlanner':
-        return <MigrationPlanner {...commonProps} />;
-      default:
-        return <DashboardComponent {...commonProps} />;
+    // Health error (context already backs off)
+    if (healthError && !isReady) {
+      return (
+        <>
+          <Alert severity="error" sx={{ mb: 2 }}>
+            System startup issue detected. Some features are disabled until ready.
+          </Alert>
+          <DashboardComponent {...commonProps} />
+        </>
+      );
     }
+
+    // Optional repos loading indicator independent from health
+    if (loadingRepos && location.pathname !== '/status') {
+      // show spinner overlay only for repo-dependent views
+    }
+ 
+    return (
+      <>
+        {/* Removed global system health alert visibility per request */}
+ 
+        <RouteRenderer path="/">
+          <DashboardComponent {...commonProps} />
+        </RouteRenderer>
+        <RouteRenderer path="/index">
+          <RepositoryIndexer {...commonProps} />
+        </RouteRenderer>
+        <RouteRenderer path="/search">
+          <SearchInterface {...commonProps} />
+        </RouteRenderer>
+        <RouteRenderer path="/chat">
+          <ChatInterface {...commonProps} />
+        </RouteRenderer>
+        <RouteRenderer path="/browse">
+          <RepositoryBrowser {...commonProps} />
+        </RouteRenderer>
+        <RouteRenderer path="/graph">
+          <DependencyGraph {...commonProps} />
+        </RouteRenderer>
+        <RouteRenderer path="/multi-repo">
+          <MultiRepoAnalysis {...commonProps} />
+        </RouteRenderer>
+        <RouteRenderer path="/migrate">
+          <MigrationPlanner {...commonProps} />
+        </RouteRenderer>
+        <RouteRenderer path="/status">
+          <SystemHealthOverview {...commonProps} />
+        </RouteRenderer>
+      </>
+    );
   };
 
   return (
     <Box sx={{ display: 'flex' }}>
       <CssBaseline />
-      
-      {/* App Bar */}
+
       <AppBar
         position="fixed"
         sx={{
@@ -113,32 +162,22 @@ function AppContent() {
           <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1 }}>
             Codebase RAG - Legacy Application Analysis
           </Typography>
-          
-          {/* System Health Indicator */}
-          {systemHealth && (
-            <Chip
-              label={systemHealth.status === 'healthy' ? 'System Healthy' : 'System Issues'}
-              color={systemHealth.status === 'healthy' ? 'success' : 'error'}
-              size="small"
-              variant="outlined"
-              sx={{ color: 'white', borderColor: 'white' }}
-            />
-          )}
-          
-          {/* Repository Count */}
-          {repositories.length > 0 && (
-            <Chip
-              label={`${repositories.length} Repositories`}
-              color="info"
-              size="small"
-              variant="outlined"
-              sx={{ ml: 1, color: 'white', borderColor: 'white' }}
-            />
-          )}
+
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            {/* Header status chips removed per request */}
+            {repositories.length > 0 && (
+              <Chip
+                label={`${repositories.length} Repositories`}
+                color="info"
+                size="small"
+                variant="outlined"
+                sx={{ color: 'white', borderColor: 'white' }}
+              />
+            )}
+          </Box>
         </Toolbar>
       </AppBar>
 
-      {/* Side Navigation Drawer */}
       <Drawer
         sx={{
           width: drawerWidth,
@@ -160,7 +199,7 @@ function AppContent() {
             </Typography>
           </Box>
         </Toolbar>
-        
+
         <List>
           {navigationItems.map((item) => (
             <ListItem key={item.text} disablePadding>
@@ -181,14 +220,19 @@ function AppContent() {
                 <ListItemIcon>
                   {item.icon}
                 </ListItemIcon>
-                <ListItemText primary={item.text} />
+                <ListItemText
+                  primary={
+                    <Typography component="span" variant="body1">
+                      {item.text}
+                    </Typography>
+                  }
+                />
               </ListItemButton>
             </ListItem>
           ))}
         </List>
       </Drawer>
 
-      {/* Main Content */}
       <Box
         component="main"
         sx={{
@@ -199,24 +243,7 @@ function AppContent() {
         }}
       >
         <Toolbar />
-        
-        {loading ? (
-          <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
-            <CircularProgress />
-          </Box>
-        ) : (
-          <>
-            {/* System Health Alert */}
-            {systemHealth && systemHealth.status !== 'healthy' && (
-              <Alert severity="error" sx={{ mb: 2 }}>
-                System Health Issue: {systemHealth.error || 'Unknown error'}
-              </Alert>
-            )}
-            
-            {/* Render Current Component */}
-            {renderCurrentComponent()}
-          </>
-        )}
+        {renderBody()}
       </Box>
     </Box>
   );

@@ -16,6 +16,7 @@ import coseBilkent from 'cytoscape-cose-bilkent';
 import euler from 'cytoscape-euler';
 
 import { ApiService } from '../services/ApiService';
+import { useSystemHealth } from '../context/SystemHealthContext';
 
 // Register cytoscape extensions
 cytoscape.use(dagre);
@@ -33,6 +34,9 @@ function DependencyGraph({ repositories }) {
   const [showLabels, setShowLabels] = useState(true);
   const [nodeSpacing, setNodeSpacing] = useState(100);
   const [graphStats, setGraphStats] = useState(null);
+  const [fileDetails, setFileDetails] = useState(null);
+  const [loadingDetails, setLoadingDetails] = useState(false);
+  const { isReady, isLoading: healthLoading, error: healthError } = useSystemHealth();
   
   const cyRef = useRef(null);
   const containerRef = useRef(null);
@@ -76,36 +80,69 @@ function DependencyGraph({ repositories }) {
   };
 
   useEffect(() => {
+    if (!isReady) return;
     if (selectedRepo) {
       loadGraphData(selectedRepo);
     }
-  }, [selectedRepo]);
+    // Cleanup Cytoscape instance on unmount to prevent leaks
+    return () => {
+      if (cyRef.current) {
+        try {
+          cyRef.current.destroy();
+        } catch (_) {}
+        cyRef.current = null;
+      }
+    };
+  }, [selectedRepo, isReady]);
+
+  const loadFileDetails = async (repoName, filePath) => {
+    if (!filePath || filePath.startsWith('node_modules/')) return;
+    
+    setLoadingDetails(true);
+    try {
+      const details = await ApiService.analyzeFile(repoName, filePath);
+      setFileDetails(details);
+    } catch (error) {
+      console.error('Failed to load file details:', error);
+      setFileDetails(null);
+    } finally {
+      setLoadingDetails(false);
+    }
+  };
 
   const loadGraphData = async (repoName) => {
-    if (!repoName) return;
+    if (!repoName || !isReady) return;
 
     setLoading(true);
     setError('');
 
     try {
-      // Try to load actual graph visualization data first
-      let visualizationData = null;
-      try {
-        visualizationData = await ApiService.getRepositoryGraphVisualization(repoName);
-      } catch (vizError) {
-        console.warn('Visualization data not available, falling back to sample data');
+      const viz = await ApiService.getRepositoryGraphVisualization(repoName, { depth: 2 });
+
+      if (!viz || (!viz.nodes?.length && !viz.edges?.length)) {
+        setGraphData(null);
+        setGraphStats(null);
+        setError('No graph data available. Index the repository to populate the knowledge graph, then refresh.');
+        setLoading(false);
+        return;
       }
 
-      // Load repository graph data
-      const data = await ApiService.getRepositoryGraph(repoName);
-      setGraphData({ ...data, visualization: visualizationData });
-      
-      // Also get system stats for enhanced graph data
-      const statsData = await ApiService.getStatus();
-      setGraphStats(statsData);
-      
-      // Initialize the graph after data is loaded
-      setTimeout(() => initializeGraph({ ...data, visualization: visualizationData }, statsData), 100);
+      const normalized = {
+        nodes: viz.nodes || [],
+        edges: viz.edges || [],
+        source: 'visualization_endpoint'
+      };
+
+      setGraphData(normalized);
+
+      try {
+        const statsData = await ApiService.getSystemStatus();
+        setGraphStats(statsData);
+      } catch (_) {
+        setGraphStats(null);
+      }
+
+      setTimeout(() => initializeGraph(normalized, graphStats), 100);
     } catch (error) {
       setError(error.message);
     } finally {
@@ -122,6 +159,14 @@ function DependencyGraph({ repositories }) {
     if (elements.length === 0) {
       setError('No graph data available for this repository');
       return;
+    }
+
+    // Destroy any existing instance before re-initializing to avoid duplicate listeners and memory leaks
+    if (cyRef.current) {
+      try {
+        cyRef.current.destroy();
+      } catch (_) {}
+      cyRef.current = null;
     }
 
     // Initialize Cytoscape
@@ -141,13 +186,23 @@ function DependencyGraph({ repositories }) {
     // Add event listeners
     cy.on('tap', 'node', function(evt) {
       const node = evt.target;
+      const nodeData = node.data();
+      
       setSelectedNode({
         id: node.id(),
-        data: node.data(),
+        data: nodeData,
         position: node.position(),
         degree: node.degree()
       });
       setShowNodeDetails(true);
+      
+      // Load detailed file analysis for file nodes
+      if (nodeData.type === 'file' || nodeData.type === 'javascript' || nodeData.type === 'python') {
+        const filePath = nodeData.path || nodeData.file_path;
+        if (filePath) {
+          loadFileDetails(selectedRepo, filePath);
+        }
+      }
     });
 
     cy.on('tap', function(evt) {
@@ -178,172 +233,65 @@ function DependencyGraph({ repositories }) {
     const elements = [];
     const addedNodes = new Set();
 
-    // Check if we have real Neo4j visualization data
-    if (data.visualization && data.visualization.nodes && data.visualization.nodes.length > 0) {
-      // Use real Neo4j data
-      const visualization = data.visualization;
-      
-      // Add nodes from Neo4j
-      visualization.nodes.forEach(node => {
-        const nodeId = `neo4j-${node.id}`;
-        if (!addedNodes.has(nodeId)) {
-          const nodeType = mapNeo4jNodeType(node.type);
-          const nodeLabel = node.name || node.artifactId || node.path || `${node.type} ${node.id}`;
-          
-          elements.push({
-            data: {
-              id: nodeId,
-              label: nodeLabel,
-              type: nodeType,
-              size: calculateNodeSize(node),
-              description: generateNodeDescription(node),
-              neo4j_id: node.id,
-              neo4j_type: node.type,
-              ...node
-            }
-          });
-          addedNodes.add(nodeId);
-        }
-      });
+    // Defensive: verify arrays
+    const nodes = Array.isArray(data?.nodes) ? data.nodes : [];
+    const edges = Array.isArray(data?.edges) ? data.edges : [];
 
-      // Add edges from Neo4j
-      visualization.edges.forEach(edge => {
-        const sourceId = `neo4j-${edge.source_id}`;
-        const targetId = `neo4j-${edge.target_id}`;
-        
-        if (addedNodes.has(sourceId) && addedNodes.has(targetId)) {
-          elements.push({
-            data: {
-              id: `edge-${edge.source_id}-${edge.target_id}`,
-              source: sourceId,
-              target: targetId,
-              type: mapRelationshipType(edge.relationship_type),
-              label: edge.relationship_type,
-              weight: edge.weight || 1
-            }
-          });
-        }
-      });
-
+    if (nodes.length === 0) {
       return elements;
     }
 
-    // Fallback to sample data if no Neo4j data available
-    // Repository node
-    const repoId = `repo-${selectedRepo}`;
-    if (!addedNodes.has(repoId)) {
+    nodes.forEach((nodeRaw) => {
+      const node = nodeRaw || {};
+      const id = String(node.id ?? '');
+      if (!id || addedNodes.has(id)) return;
+
+      // Ensure safe fields with fallbacks to avoid cytoscape warnings
+      const type = node.type || 'unknown';
+      const size = Number.isFinite(node.size) ? node.size : calculateNodeSizeFromType(type);
+      const label = node.name || node.path || type || id;
+      const description = node.path || node.name || `${type}`;
+
+      const dataObj = {
+        id,
+        label,
+        type,
+        size,
+        description
+      };
+
+      // Only attach optional fields if present to avoid undefined mappings
+      if (node.color) dataObj.color = node.color;
+      if (node.path) dataObj.path = node.path;
+      if (node.name) dataObj.name = node.name;
+      if (node.version) dataObj.version = node.version;
+      if (Number.isFinite(node.count)) dataObj.count = node.count;
+
+      elements.push({ data: dataObj });
+      addedNodes.add(id);
+    });
+
+    edges.forEach((edgeRaw) => {
+      const e = edgeRaw || {};
+      const src = String(e.source ?? '');
+      const tgt = String(e.target ?? '');
+      if (!src || !tgt) return;
+      if (!addedNodes.has(src) || !addedNodes.has(tgt)) return;
+
+      const rel = e.relationship_type || e.type || 'rel';
+      const eid = `edge-${src}-${tgt}-${rel}`;
+
       elements.push({
         data: {
-          id: repoId,
-          label: selectedRepo,
-          type: 'repository',
-          size: 60,
-          description: `Main repository: ${selectedRepo}`,
-          stats: data.graph_stats || {}
+          id: eid,
+          source: src,
+          target: tgt,
+          type: mapRelationshipType(rel),
+          label: rel,
+          weight: Number.isFinite(e.weight) ? e.weight : 1
         }
       });
-      addedNodes.add(repoId);
-    }
-
-    // Add Maven dependencies if available
-    if (stats?.neo4j?.total_dependencies > 0) {
-      // Generate some sample dependency nodes
-      const sampleDependencies = [
-        { id: 'spring-core', label: 'Spring Core', type: 'dependency', version: '5.3.21' },
-        { id: 'hibernate-core', label: 'Hibernate Core', type: 'dependency', version: '5.6.9' },
-        { id: 'struts2-core', label: 'Struts2 Core', type: 'dependency', version: '2.5.28' },
-        { id: 'mysql-connector', label: 'MySQL Connector', type: 'dependency', version: '8.0.29' },
-        { id: 'jackson-databind', label: 'Jackson Databind', type: 'dependency', version: '2.13.3' }
-      ];
-
-      sampleDependencies.forEach(dep => {
-        if (!addedNodes.has(dep.id)) {
-          elements.push({
-            data: {
-              id: dep.id,
-              label: dep.label,
-              type: dep.type,
-              size: 40,
-              description: `${dep.label} v${dep.version}`,
-              version: dep.version
-            }
-          });
-          addedNodes.add(dep.id);
-
-          // Add edge from repository to dependency
-          elements.push({
-            data: {
-              id: `${repoId}-${dep.id}`,
-              source: repoId,
-              target: dep.id,
-              type: 'depends-on',
-              label: 'depends on'
-            }
-          });
-        }
-      });
-    }
-
-    // Add code structure nodes if available
-    if (stats?.neo4j?.total_files > 0) {
-      // Generate sample code structure
-      const codeStructure = [
-        { id: 'actions', label: 'Actions', type: 'package', count: 15 },
-        { id: 'forms', label: 'Forms', type: 'package', count: 12 },
-        { id: 'services', label: 'Services', type: 'package', count: 8 },
-        { id: 'models', label: 'Models', type: 'package', count: 20 },
-        { id: 'config', label: 'Configuration', type: 'config', count: 5 }
-      ];
-
-      codeStructure.forEach(item => {
-        if (!addedNodes.has(item.id)) {
-          elements.push({
-            data: {
-              id: item.id,
-              label: `${item.label} (${item.count})`,
-              type: item.type,
-              size: 35,
-              description: `${item.label}: ${item.count} files`,
-              count: item.count
-            }
-          });
-          addedNodes.add(item.id);
-
-          // Add edge from repository to code structure
-          elements.push({
-            data: {
-              id: `${repoId}-${item.id}`,
-              source: repoId,
-              target: item.id,
-              type: 'contains',
-              label: 'contains'
-            }
-          });
-        }
-      });
-
-      // Add some inter-package relationships
-      const relationships = [
-        { from: 'actions', to: 'services', type: 'uses' },
-        { from: 'actions', to: 'forms', type: 'uses' },
-        { from: 'services', to: 'models', type: 'uses' },
-        { from: 'config', to: 'services', type: 'configures' }
-      ];
-
-      relationships.forEach(rel => {
-        if (addedNodes.has(rel.from) && addedNodes.has(rel.to)) {
-          elements.push({
-            data: {
-              id: `${rel.from}-${rel.to}`,
-              source: rel.from,
-              target: rel.to,
-              type: rel.type,
-              label: rel.type
-            }
-          });
-        }
-      });
-    }
+    });
 
     return elements;
   };
@@ -370,6 +318,19 @@ function DependencyGraph({ repositories }) {
     return 30;
   };
 
+  const calculateNodeSizeFromType = (nodeType) => {
+    switch (nodeType) {
+      case 'repository': return 60;
+      case 'directory': return 45;
+      case 'file': return 35;
+      case 'javascript': return 40;
+      case 'python': return 40;
+      case 'config': return 35;
+      case 'documentation': return 30;
+      default: return 30;
+    }
+  };
+
   const generateNodeDescription = (node) => {
     if (node.type === 'Repository') return `Repository: ${node.name}`;
     if (node.type === 'File') return `File: ${node.path}`;
@@ -393,10 +354,11 @@ function DependencyGraph({ repositories }) {
   };
 
   const getGraphStyles = () => [
+    // Base node style with safe fallbacks to avoid cytoscape warnings when data fields are missing
     {
       selector: 'node',
       style: {
-        'background-color': 'data(color)',
+        'background-color': '#90caf9', // fallback color
         'label': showLabels ? 'data(label)' : '',
         'text-valign': 'center',
         'text-halign': 'center',
@@ -405,12 +367,19 @@ function DependencyGraph({ repositories }) {
         'color': '#333',
         'text-outline-width': 2,
         'text-outline-color': '#fff',
-        'width': 'data(size)',
-        'height': 'data(size)',
+        'width': 'mapData(size, 10, 120, 20, 60)', // bounded fallback
+        'height': 'mapData(size, 10, 120, 20, 60)',
         'border-width': 2,
         'border-color': '#666',
         'transition-property': 'background-color, border-color, width, height',
         'transition-duration': '0.2s'
+      }
+    },
+    // Only apply color mapping when a color is defined to suppress mapping warnings
+    {
+      selector: 'node[color]',
+      style: {
+        'background-color': 'data(color)'
       }
     },
     {
@@ -459,6 +428,38 @@ function DependencyGraph({ repositories }) {
         'background-color': '#607d8b',
         'border-color': '#455a64',
         'shape': 'hexagon'
+      }
+    },
+    {
+      selector: 'node[type="directory"]',
+      style: {
+        'background-color': '#ffc107',
+        'border-color': '#ff8f00',
+        'shape': 'roundrectangle'
+      }
+    },
+    {
+      selector: 'node[type="javascript"]',
+      style: {
+        'background-color': '#f7df1e',
+        'border-color': '#d4c71a',
+        'shape': 'rectangle'
+      }
+    },
+    {
+      selector: 'node[type="python"]',
+      style: {
+        'background-color': '#3776ab',
+        'border-color': '#2b5a87',
+        'shape': 'rectangle'
+      }
+    },
+    {
+      selector: 'node[type="documentation"]',
+      style: {
+        'background-color': '#17a2b8',
+        'border-color': '#138496',
+        'shape': 'ellipse'
       }
     },
     {
@@ -559,7 +560,10 @@ function DependencyGraph({ repositories }) {
       if (newLayout === 'dagre') {
         layoutConfig.spacingFactor = nodeSpacing / 100;
       }
-      cyRef.current.layout(layoutConfig).run();
+      // Re-run layout safely
+      try {
+        cyRef.current.layout(layoutConfig).run();
+      } catch (_) {}
     }
   };
 
@@ -575,51 +579,67 @@ function DependencyGraph({ repositories }) {
   const handleToggleLabels = (event) => {
     setShowLabels(event.target.checked);
     if (cyRef.current) {
-      cyRef.current.style().update();
+      try {
+        cyRef.current.style().update();
+      } catch (_) {}
     }
   };
 
   const handleZoomIn = () => {
     if (cyRef.current) {
-      cyRef.current.zoom(cyRef.current.zoom() * 1.2);
-      cyRef.current.center();
+      try {
+        cyRef.current.zoom(cyRef.current.zoom() * 1.2);
+        cyRef.current.center();
+      } catch (_) {}
     }
   };
 
   const handleZoomOut = () => {
     if (cyRef.current) {
-      cyRef.current.zoom(cyRef.current.zoom() * 0.8);
-      cyRef.current.center();
+      try {
+        cyRef.current.zoom(cyRef.current.zoom() * 0.8);
+        cyRef.current.center();
+      } catch (_) {}
     }
   };
 
   const handleFitToView = () => {
     if (cyRef.current) {
-      cyRef.current.fit();
+      try {
+        cyRef.current.fit();
+      } catch (_) {}
     }
   };
 
   const handleExportGraph = () => {
     if (cyRef.current) {
-      const png64 = cyRef.current.png({ scale: 2 });
-      const link = document.createElement('a');
-      link.download = `${selectedRepo}-dependency-graph.png`;
-      link.href = png64;
-      link.click();
+      try {
+        const png64 = cyRef.current.png({ scale: 2 });
+        const link = document.createElement('a');
+        link.download = `${selectedRepo}-dependency-graph.png`;
+        link.href = png64;
+        link.click();
+      } catch (_) {}
     }
   };
 
   const NodeDetailsDialog = () => (
     <Dialog 
       open={showNodeDetails} 
-      onClose={() => setShowNodeDetails(false)}
-      maxWidth="sm"
+      onClose={() => {
+        setShowNodeDetails(false);
+        setFileDetails(null);
+      }}
+      maxWidth="md"
       fullWidth
     >
       <DialogTitle>
-        <Box display="flex" justifyContent="between" alignItems="center">
+        <Box display="flex" justifyContent="space-between" alignItems="center">
           Node Details
-          <IconButton onClick={() => setShowNodeDetails(false)}>
+          <IconButton onClick={() => {
+            setShowNodeDetails(false);
+            setFileDetails(null);
+          }}>
             <Close />
           </IconButton>
         </Box>
@@ -654,6 +674,172 @@ function DependencyGraph({ repositories }) {
                 <Typography variant="subtitle2">Files: {selectedNode.data.count}</Typography>
               </Box>
             )}
+
+            {/* File Details Section */}
+            {(selectedNode.data.type === 'file' || selectedNode.data.type === 'javascript' || selectedNode.data.type === 'python') && (
+              <Box sx={{ mt: 3 }}>
+                <Divider sx={{ mb: 2 }} />
+                <Typography variant="h6" gutterBottom>
+                  File Analysis
+                </Typography>
+                
+                {loadingDetails && (
+                  <Box display="flex" alignItems="center" gap={1}>
+                    <CircularProgress size={16} />
+                    <Typography variant="body2">Loading file details...</Typography>
+                  </Box>
+                )}
+                
+                {fileDetails && (
+                  <>
+                    {/* Migration Complexity Overview */}
+                    <Box sx={{ mb: 2, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
+                      <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
+                        Migration Assessment
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" paragraph>
+                        {fileDetails.migration_insights?.complexity_score}
+                      </Typography>
+                      
+                      <Grid container spacing={2}>
+                        <Grid item xs={6} sm={3}>
+                          <Chip 
+                            label={`${fileDetails.migration_insights?.api_endpoints_found || 0} API Endpoints`} 
+                            size="small" 
+                            color={fileDetails.migration_insights?.api_endpoints_found > 0 ? "error" : "default"}
+                            variant={fileDetails.migration_insights?.api_endpoints_found > 0 ? "filled" : "outlined"}
+                          />
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                          <Chip 
+                            label={`${fileDetails.migration_insights?.database_operations || 0} DB Operations`} 
+                            size="small" 
+                            color={fileDetails.migration_insights?.database_operations > 0 ? "warning" : "default"}
+                            variant={fileDetails.migration_insights?.database_operations > 0 ? "filled" : "outlined"}
+                          />
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                          <Chip 
+                            label={`${fileDetails.migration_insights?.critical_business_functions || 0} Business Logic`} 
+                            size="small" 
+                            color={fileDetails.migration_insights?.critical_business_functions > 0 ? "secondary" : "default"}
+                            variant={fileDetails.migration_insights?.critical_business_functions > 0 ? "filled" : "outlined"}
+                          />
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                          <Chip 
+                            label={`${fileDetails.migration_insights?.external_integrations || 0} Integrations`} 
+                            size="small" 
+                            color={fileDetails.migration_insights?.external_integrations > 0 ? "info" : "default"}
+                            variant={fileDetails.migration_insights?.external_integrations > 0 ? "filled" : "outlined"}
+                          />
+                        </Grid>
+                      </Grid>
+                    </Box>
+
+                    {/* CRITICAL Business Insights */}
+                    {fileDetails.business_analysis?.api_endpoints?.length > 0 && (
+                      <Box sx={{ mb: 2 }}>
+                        <Typography variant="subtitle2" gutterBottom color="error.main" fontWeight="bold">
+                          🚨 API Endpoints (User-Facing):
+                        </Typography>
+                        <List dense>
+                          {fileDetails.business_analysis.api_endpoints.map((endpoint, idx) => (
+                            <ListItem key={idx} sx={{ bgcolor: 'error.light', mb: 1, borderRadius: 1 }}>
+                              <ListItemText 
+                                primary={`${endpoint.method} ${endpoint.endpoint}`}
+                                secondary={`Line ${endpoint.line} - ${endpoint.migration_priority}`}
+                              />
+                            </ListItem>
+                          ))}
+                        </List>
+                      </Box>
+                    )}
+
+                    {fileDetails.business_analysis?.database_operations?.length > 0 && (
+                      <Box sx={{ mb: 2 }}>
+                        <Typography variant="subtitle2" gutterBottom color="warning.main" fontWeight="bold">
+                          💾 Database Operations:
+                        </Typography>
+                        <List dense>
+                          {fileDetails.business_analysis.database_operations.map((op, idx) => (
+                            <ListItem key={idx} sx={{ bgcolor: 'warning.light', mb: 1, borderRadius: 1 }}>
+                              <ListItemText 
+                                primary={op.operation}
+                                secondary={`Line ${op.line} - ${op.migration_priority}`}
+                              />
+                            </ListItem>
+                          ))}
+                        </List>
+                      </Box>
+                    )}
+
+                    {fileDetails.business_analysis?.business_logic?.length > 0 && (
+                      <Box sx={{ mb: 2 }}>
+                        <Typography variant="subtitle2" gutterBottom color="secondary.main" fontWeight="bold">
+                          🎯 Business Logic (Core Functionality):
+                        </Typography>
+                        <List dense>
+                          {fileDetails.business_analysis.business_logic.map((logic, idx) => (
+                            <ListItem key={idx} sx={{ bgcolor: 'secondary.light', mb: 1, borderRadius: 1 }}>
+                              <ListItemText 
+                                primary={logic.logic_type}
+                                secondary={`Line ${logic.line} - ${logic.migration_priority}`}
+                              />
+                            </ListItem>
+                          ))}
+                        </List>
+                      </Box>
+                    )}
+
+                    {fileDetails.business_analysis?.business_validation?.length > 0 && (
+                      <Box sx={{ mb: 2 }}>
+                        <Typography variant="subtitle2" gutterBottom color="info.main" fontWeight="bold">
+                          ✅ Business Validation Rules:
+                        </Typography>
+                        <List dense>
+                          {fileDetails.business_analysis.business_validation.map((validation, idx) => (
+                            <ListItem key={idx} sx={{ bgcolor: 'info.light', mb: 1, borderRadius: 1 }}>
+                              <ListItemText 
+                                primary={validation.validation_type}
+                                secondary={`Line ${validation.line} - ${validation.migration_priority}`}
+                              />
+                            </ListItem>
+                          ))}
+                        </List>
+                      </Box>
+                    )}
+
+                    {fileDetails.business_analysis?.external_integrations?.length > 0 && (
+                      <Box sx={{ mb: 2 }}>
+                        <Typography variant="subtitle2" gutterBottom color="primary.main" fontWeight="bold">
+                          🔗 External Integrations:
+                        </Typography>
+                        <List dense>
+                          {fileDetails.business_analysis.external_integrations.map((integration, idx) => (
+                            <ListItem key={idx} sx={{ bgcolor: 'primary.light', mb: 1, borderRadius: 1 }}>
+                              <ListItemText 
+                                primary={`${integration.service_type} → ${integration.target}`}
+                                secondary={`Line ${integration.line} - ${integration.migration_priority}`}
+                              />
+                            </ListItem>
+                          ))}
+                        </List>
+                      </Box>
+                    )}
+
+                    {/* Technical Context (Collapsed by default) */}
+                    {fileDetails.technical_details && (
+                      <Box sx={{ mt: 3 }}>
+                        <Typography variant="caption" color="text.secondary">
+                          Technical Context ({fileDetails.migration_insights?.technical_functions} functions, {fileDetails.migration_insights?.lines_of_code} lines)
+                        </Typography>
+                      </Box>
+                    )}
+                  </>
+                )}
+              </Box>
+            )}
           </Box>
         )}
       </DialogContent>
@@ -669,6 +855,14 @@ function DependencyGraph({ repositories }) {
         Interactive visualization of dependencies and relationships in your repositories.
       </Typography>
 
+      {(!isReady || healthLoading || healthError) && (
+        <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 2 }}>
+          {!isReady ? 'System is starting up. Graph features are disabled until ready.' :
+           healthLoading ? 'Checking system readiness...' :
+           `Health error: ${healthError}`}
+        </Alert>
+      )}
+
       {repositories.length === 0 ? (
         <Alert severity="info">
           No repositories indexed yet. Please index some repositories first.
@@ -679,7 +873,7 @@ function DependencyGraph({ repositories }) {
           <Paper sx={{ p: 3, mb: 3 }}>
             <Grid container spacing={2} alignItems="center">
               <Grid item xs={12} md={3}>
-                <FormControl fullWidth>
+                <FormControl fullWidth disabled={!isReady}>
                   <InputLabel>Repository</InputLabel>
                   <Select
                     value={selectedRepo}
@@ -687,8 +881,8 @@ function DependencyGraph({ repositories }) {
                     onChange={(e) => setSelectedRepo(e.target.value)}
                   >
                     {repositories.map((repo, index) => (
-                      <MenuItem key={index} value={repo}>
-                        {repo}
+                      <MenuItem key={index} value={repo.name || repo}>
+                        {repo.name || repo}
                       </MenuItem>
                     ))}
                   </Select>
@@ -702,7 +896,7 @@ function DependencyGraph({ repositories }) {
                     value={layout}
                     label="Layout"
                     onChange={(e) => handleLayoutChange(e.target.value)}
-                    disabled={!graphData}
+                    disabled={!graphData || !isReady}
                   >
                     <MenuItem value="dagre">Hierarchical</MenuItem>
                     <MenuItem value="cose-bilkent">Force-Directed</MenuItem>
@@ -717,7 +911,7 @@ function DependencyGraph({ repositories }) {
                     <Switch
                       checked={showLabels}
                       onChange={handleToggleLabels}
-                      disabled={!graphData}
+                      disabled={!graphData || !isReady}
                     />
                   }
                   label="Show Labels"
@@ -733,7 +927,7 @@ function DependencyGraph({ repositories }) {
                   onChange={handleNodeSpacingChange}
                   min={50}
                   max={200}
-                  disabled={!graphData || layout !== 'dagre'}
+                  disabled={!graphData || layout !== 'dagre' || !isReady}
                   size="small"
                 />
               </Grid>
@@ -741,49 +935,59 @@ function DependencyGraph({ repositories }) {
               <Grid item xs={12} md={3}>
                 <Box display="flex" gap={1}>
                   <Tooltip title="Refresh">
-                    <IconButton
-                      onClick={() => loadGraphData(selectedRepo)}
-                      disabled={!selectedRepo || loading}
-                      size="small"
-                    >
-                      <Refresh />
-                    </IconButton>
+                    <span>
+                      <IconButton
+                        onClick={() => loadGraphData(selectedRepo)}
+                        disabled={!isReady || !selectedRepo || loading}
+                        size="small"
+                      >
+                        <Refresh />
+                      </IconButton>
+                    </span>
                   </Tooltip>
                   <Tooltip title="Zoom In">
-                    <IconButton
-                      onClick={handleZoomIn}
-                      disabled={!graphData}
-                      size="small"
-                    >
-                      <ZoomIn />
-                    </IconButton>
+                    <span>
+                      <IconButton
+                        onClick={handleZoomIn}
+                        disabled={!graphData || !isReady}
+                        size="small"
+                      >
+                        <ZoomIn />
+                      </IconButton>
+                    </span>
                   </Tooltip>
                   <Tooltip title="Zoom Out">
-                    <IconButton
-                      onClick={handleZoomOut}
-                      disabled={!graphData}
-                      size="small"
-                    >
-                      <ZoomOut />
-                    </IconButton>
+                    <span>
+                      <IconButton
+                        onClick={handleZoomOut}
+                        disabled={!graphData || !isReady}
+                        size="small"
+                      >
+                        <ZoomOut />
+                      </IconButton>
+                    </span>
                   </Tooltip>
                   <Tooltip title="Fit to View">
-                    <IconButton
-                      onClick={handleFitToView}
-                      disabled={!graphData}
-                      size="small"
-                    >
-                      <CenterFocusStrong />
-                    </IconButton>
+                    <span>
+                      <IconButton
+                        onClick={handleFitToView}
+                        disabled={!graphData || !isReady}
+                        size="small"
+                      >
+                        <CenterFocusStrong />
+                      </IconButton>
+                    </span>
                   </Tooltip>
                   <Tooltip title="Export PNG">
-                    <IconButton
-                      onClick={handleExportGraph}
-                      disabled={!graphData}
-                      size="small"
-                    >
-                      <Download />
-                    </IconButton>
+                    <span>
+                      <IconButton
+                        onClick={handleExportGraph}
+                        disabled={!graphData || !isReady}
+                        size="small"
+                      >
+                        <Download />
+                      </IconButton>
+                    </span>
                   </Tooltip>
                 </Box>
               </Grid>
@@ -814,6 +1018,11 @@ function DependencyGraph({ repositories }) {
                 {error}
               </Alert>
             )}
+            {!isReady && !loading && (
+              <Alert severity="info" sx={{ m: 2 }}>
+                Waiting for system readiness to load graph data...
+              </Alert>
+            )}
 
             <div
               ref={containerRef}
@@ -825,11 +1034,11 @@ function DependencyGraph({ repositories }) {
               }}
             />
 
-            {!selectedRepo && !loading && (
-              <Box 
-                display="flex" 
-                justifyContent="center" 
-                alignItems="center" 
+            {(!selectedRepo || (!!error && error.includes('Index'))) && !loading && (
+              <Box
+                display="flex"
+                justifyContent="center"
+                alignItems="center"
                 position="absolute"
                 top={0}
                 left={0}
@@ -837,7 +1046,9 @@ function DependencyGraph({ repositories }) {
                 bottom={0}
               >
                 <Typography color="text.secondary">
-                  Select a repository to view its dependency graph
+                  {selectedRepo
+                    ? 'No graph data available. Index the repository to populate the knowledge graph, then refresh.'
+                    : 'Select a repository to view its dependency graph'}
                 </Typography>
               </Box>
             )}

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from ...core.chromadb_client import ChromaDBClient
 from ...core.neo4j_client import Neo4jClient, GraphQuery
 from ...services.repository_processor import RepositoryProcessor
-from ...main import get_chroma_client, get_neo4j_client, get_repository_processor
+from ...dependencies import get_chroma_client, get_neo4j_client, get_repository_processor
 
 
 router = APIRouter()

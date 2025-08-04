@@ -1,18 +1,33 @@
 """
 Indexing API routes for repository processing and management.
+Enhanced with comprehensive error handling, performance tracking, and validation.
 """
 
 import asyncio
 import time
-from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query as QueryParam
+from pathlib import Path
+from typing import List, Optional, Dict, Any, AsyncGenerator
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query as QueryParam, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
+from datetime import datetime
+from enum import Enum
+import json
 
-from ...services.repository_processor import (
-    RepositoryProcessor, RepositoryConfig, RepositoryFilter, 
-    RepositoryPriority, ProcessingStatus
+from ...services.repository_processor_v2 import (
+    EnhancedRepositoryProcessor, RepositoryConfig, RepositoryFilter, 
+    RepositoryPriority, ProcessingStatus, LocalRepositoryConfig
 )
-from ...main import get_repository_processor
+from ...dependencies import get_repository_processor
+from ...core.neo4j_client import GraphQuery
+from ...core.error_handling import handle_api_errors, error_handling_context, get_error_handler
+from ...core.logging_config import log_performance, log_validation_result, get_logger
+from ...core.performance_metrics import performance_collector
+from ...core.exceptions import (
+    GraphRAGException, ErrorContext, ProcessingError, ValidationError, 
+    TimeoutError as GraphRAGTimeoutError, ResourceError
+)
+from ...core.diagnostics import diagnostic_collector
 
 
 router = APIRouter()
@@ -40,6 +55,28 @@ class RepositoryIndexRequest(BaseModel):
                 "business_domain": "authentication",
                 "team_owner": "platform-team",
                 "maven_enabled": True,
+                "is_golden_repo": False
+            }
+        }
+
+
+class LocalRepositoryIndexRequest(BaseModel):
+    """Request model for local repository indexing."""
+    name: str = Field(..., description="Repository name")
+    local_path: str = Field(..., description="Local filesystem path to repository")
+    priority: RepositoryPriority = Field(default=RepositoryPriority.MEDIUM, description="Processing priority")
+    business_domain: Optional[str] = Field(None, description="Business domain")
+    team_owner: Optional[str] = Field(None, description="Team owner")
+    is_golden_repo: bool = Field(default=False, description="Mark as golden repository")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "name": "local-project",
+                "local_path": "C:/devl/projects/my-app",
+                "priority": "high",
+                "business_domain": "core",
+                "team_owner": "dev-team",
                 "is_golden_repo": False
             }
         }
@@ -88,6 +125,118 @@ class RepositoryFilterRequest(BaseModel):
         }
 
 
+class ProcessingStage(str, Enum):
+    """Enhanced processing stages for detailed tracking."""
+    QUEUED = "queued"
+    CLONING = "cloning"
+    ANALYZING = "analyzing"
+    PARSING = "parsing"
+    EMBEDDING = "embedding"
+    STORING = "storing"
+    VALIDATING = "validating"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class StageProgress(BaseModel):
+    """Progress information for a specific processing stage."""
+    stage: ProcessingStage
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    progress_percentage: float = Field(ge=0.0, le=100.0, default=0.0)
+    current_operation: Optional[str] = None
+    processed_items: int = 0
+    total_items: Optional[int] = None
+    error_message: Optional[str] = None
+
+
+class EmbeddingProgress(BaseModel):
+    """Detailed embedding generation progress."""
+    total_chunks: int = 0
+    embedded_chunks: int = 0
+    embedding_rate: float = 0.0  # chunks per second
+    estimated_completion: Optional[datetime] = None
+    current_file: Optional[str] = None
+    embedding_errors: List[str] = Field(default_factory=list)
+
+
+class IndexingError(BaseModel):
+    """Detailed error information for indexing operations."""
+    error_type: str
+    error_message: str
+    file_path: Optional[str] = None
+    stage: ProcessingStage
+    timestamp: datetime
+    recoverable: bool = True
+    stack_trace: Optional[str] = None
+
+
+class EnhancedIndexingStatus(BaseModel):
+    """Enhanced indexing status with detailed progress tracking."""
+    repository_name: str
+    task_id: str
+    run_id: str
+    status: ProcessingStatus
+    current_stage: ProcessingStage
+    overall_progress: float = Field(ge=0.0, le=100.0, default=0.0)
+    
+    # Stage tracking
+    stage_history: List[StageProgress] = Field(default_factory=list)
+    current_stage_progress: Optional[StageProgress] = None
+    
+    # File processing
+    processed_files: int = 0
+    total_files: Optional[int] = None
+    current_file: Optional[str] = None
+    files_by_language: Dict[str, int] = Field(default_factory=dict)
+    
+    # Embedding tracking
+    embedding_progress: EmbeddingProgress = Field(default_factory=EmbeddingProgress)
+    
+    # Chunk generation
+    generated_chunks: int = 0
+    stored_chunks: int = 0
+    
+    # Timing
+    started_at: datetime
+    estimated_completion: Optional[datetime] = None
+    processing_time: float = 0.0
+    
+    # Error tracking
+    errors: List[IndexingError] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    
+    # Performance metrics
+    throughput_files_per_second: float = 0.0
+    throughput_chunks_per_second: float = 0.0
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "repository_name": "user-service",
+                "task_id": "user-service_1691234567",
+                "run_id": "abc123def456",
+                "status": "in_progress",
+                "current_stage": "embedding",
+                "overall_progress": 65.5,
+                "processed_files": 82,
+                "total_files": 125,
+                "current_file": "src/main/java/UserService.java",
+                "generated_chunks": 347,
+                "stored_chunks": 320,
+                "embedding_progress": {
+                    "total_chunks": 347,
+                    "embedded_chunks": 320,
+                    "embedding_rate": 12.5,
+                    "current_file": "src/main/java/UserService.java"
+                },
+                "processing_time": 45.6,
+                "errors": [],
+                "warnings": ["Large file skipped: config/large-data.json"]
+            }
+        }
+
+
 class IndexingStatusResponse(BaseModel):
     """Response model for indexing status."""
     repository_name: str
@@ -112,16 +261,109 @@ class IndexingStatusResponse(BaseModel):
         }
 
 
-# Global task tracking
+# Enhanced global task tracking
 processing_tasks: Dict[str, asyncio.Task] = {}
-task_status: Dict[str, Dict[str, Any]] = {}
+task_status: Dict[str, EnhancedIndexingStatus] = {}
+
+# WebSocket connection management
+active_websockets: Dict[str, List[WebSocket]] = {}
+
+class StatusUpdateManager:
+    """Manages real-time status updates and WebSocket connections."""
+    
+    @staticmethod
+    async def update_task_status(task_id: str, updates: Dict[str, Any]) -> None:
+        """Update task status and notify WebSocket clients."""
+        if task_id in task_status:
+            # Update the status object
+            current_status = task_status[task_id]
+            for key, value in updates.items():
+                if hasattr(current_status, key):
+                    setattr(current_status, key, value)
+            
+            # Notify WebSocket clients
+            await StatusUpdateManager.broadcast_status_update(task_id, current_status)
+    
+    @staticmethod
+    async def add_stage_progress(task_id: str, stage: ProcessingStage, **kwargs) -> None:
+        """Add a new stage to the progress history."""
+        if task_id in task_status:
+            current_status = task_status[task_id]
+            stage_progress = StageProgress(
+                stage=stage,
+                started_at=datetime.now(),
+                **kwargs
+            )
+            current_status.stage_history.append(stage_progress)
+            current_status.current_stage = stage
+            current_status.current_stage_progress = stage_progress
+            
+            await StatusUpdateManager.broadcast_status_update(task_id, current_status)
+    
+    @staticmethod
+    async def complete_stage(task_id: str, **kwargs) -> None:
+        """Mark the current stage as completed."""
+        if task_id in task_status:
+            current_status = task_status[task_id]
+            if current_status.current_stage_progress:
+                current_status.current_stage_progress.completed_at = datetime.now()
+                current_status.current_stage_progress.progress_percentage = 100.0
+                for key, value in kwargs.items():
+                    if hasattr(current_status.current_stage_progress, key):
+                        setattr(current_status.current_stage_progress, key, value)
+                
+                await StatusUpdateManager.broadcast_status_update(task_id, current_status)
+    
+    @staticmethod
+    async def add_error(task_id: str, error_type: str, error_message: str, 
+                       file_path: Optional[str] = None, recoverable: bool = True) -> None:
+        """Add an error to the task status."""
+        if task_id in task_status:
+            current_status = task_status[task_id]
+            error = IndexingError(
+                error_type=error_type,
+                error_message=error_message,
+                file_path=file_path,
+                stage=current_status.current_stage,
+                timestamp=datetime.now(),
+                recoverable=recoverable
+            )
+            current_status.errors.append(error)
+            
+            await StatusUpdateManager.broadcast_status_update(task_id, current_status)
+    
+    @staticmethod
+    async def broadcast_status_update(task_id: str, status: EnhancedIndexingStatus) -> None:
+        """Broadcast status update to all connected WebSocket clients."""
+        if task_id in active_websockets:
+            message = {
+                "type": "status_update",
+                "task_id": task_id,
+                "data": status.dict()
+            }
+            
+            # Remove disconnected clients
+            connected_clients = []
+            for websocket in active_websockets[task_id]:
+                try:
+                    await websocket.send_text(json.dumps(message, default=str))
+                    connected_clients.append(websocket)
+                except:
+                    # Client disconnected, skip
+                    pass
+            
+            active_websockets[task_id] = connected_clients
+            if not connected_clients:
+                del active_websockets[task_id]
 
 
 @router.post("/repository", response_model=IndexingStatusResponse)
+@handle_api_errors
 async def index_repository(
     request: RepositoryIndexRequest,
     background_tasks: BackgroundTasks,
-    processor: RepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor),
+    dry_run: bool = QueryParam(default=False, description="Analyze and estimate without writing to Neo4j/Chroma")
 ):
     """
     Index a single repository.
@@ -129,54 +371,277 @@ async def index_repository(
     This endpoint starts the indexing process for a repository and returns
     immediately with a task ID for status tracking.
     """
+    async with error_handling_context(
+        "indexing",
+        "index_repository",
+        repository_name=request.name,
+        repository_url=str(request.url),
+        dry_run=dry_run
+    ) as ctx:
+        try:
+            # Create repository config
+            repo_config = RepositoryConfig(
+                name=request.name,
+                url=str(request.url),
+                branch=request.branch,
+                priority=request.priority,
+                business_domain=request.business_domain,
+                team_owner=request.team_owner,
+                maven_enabled=request.maven_enabled,
+                is_golden_repo=request.is_golden_repo
+            )
+            
+            # Start background processing
+            task_id = f"{request.name}_{int(time.time())}"
+            run_id = __import__("uuid").uuid4().hex
+
+            async def process_repository():
+                try:
+                    # Initialize enhanced status tracking
+                    task_status[task_id] = EnhancedIndexingStatus(
+                        repository_name=request.name,
+                        task_id=task_id,
+                        run_id=run_id,
+                        status=ProcessingStatus.IN_PROGRESS,
+                        current_stage=ProcessingStage.QUEUED,
+                        started_at=datetime.now()
+                    )
+
+                    # Stage 1: Cloning/Preparation
+                    await StatusUpdateManager.add_stage_progress(
+                        task_id, ProcessingStage.CLONING,
+                        current_operation="Preparing repository for processing"
+                    )
+                    
+                    start_time = time.time()
+                    
+                    if dry_run:
+                        result = await processor.process_repository_dry_run(repo_config, run_id=run_id)
+                    else:
+                        # Enhanced processing with progress callbacks
+                        result = await processor.process_repository(
+                            repo_config,
+                            run_id=run_id,
+                            progress_callback=lambda stage, progress, details=None:
+                                asyncio.create_task(_update_progress(stage, progress, details))
+                        )
+
+                    await StatusUpdateManager.complete_stage(task_id)
+                    
+                    # Update final status
+                    await StatusUpdateManager.update_task_status(task_id, {
+                        "status": result.status,
+                        "current_stage": ProcessingStage.COMPLETED if result.status == ProcessingStatus.COMPLETED else ProcessingStage.FAILED,
+                        "overall_progress": 100.0,
+                        "processed_files": result.processed_files,
+                        "generated_chunks": result.generated_chunks,
+                        "stored_chunks": result.generated_chunks,
+                        "processing_time": time.time() - start_time,
+                        "throughput_files_per_second": result.processed_files / max(time.time() - start_time, 1),
+                        "throughput_chunks_per_second": result.generated_chunks / max(time.time() - start_time, 1)
+                    })
+
+                    if result.error_message:
+                        await StatusUpdateManager.add_error(
+                            task_id, "processing_error", result.error_message, recoverable=False
+                        )
+
+                except Exception as e:
+                    await StatusUpdateManager.update_task_status(task_id, {
+                        "status": ProcessingStatus.FAILED,
+                        "current_stage": ProcessingStage.FAILED,
+                        "processing_time": time.time() - start_time if 'start_time' in locals() else 0
+                    })
+                    await StatusUpdateManager.add_error(
+                        task_id, "unexpected_error", str(e), recoverable=False
+                    )
+                finally:
+                    # Ensure stage is marked complete in case of early failure
+                    try:
+                        await StatusUpdateManager.complete_stage(task_id)
+                    except Exception:
+                        pass
+
+            # end async def process_repository
+
+            async def _update_progress(stage: str, progress: float, details: Optional[Dict] = None):
+                """Internal progress update callback."""
+                stage_mapping = {
+                    "cloning": ProcessingStage.CLONING,
+                    "analyzing": ProcessingStage.ANALYZING,
+                    "parsing": ProcessingStage.PARSING,
+                    "embedding": ProcessingStage.EMBEDDING,
+                    "storing": ProcessingStage.STORING,
+                    "validating": ProcessingStage.VALIDATING
+                }
+                
+                processing_stage = stage_mapping.get(stage, ProcessingStage.ANALYZING)
+                
+                updates = {
+                    "overall_progress": progress,
+                    "current_stage": processing_stage
+                }
+                
+                if details:
+                    if "current_file" in details:
+                        updates["current_file"] = details["current_file"]
+                    if "processed_files" in details:
+                        updates["processed_files"] = details["processed_files"]
+                    if "total_files" in details:
+                        updates["total_files"] = details["total_files"]
+                    if "generated_chunks" in details:
+                        updates["generated_chunks"] = details["generated_chunks"]
+                    if "embedding_progress" in details:
+                        updates["embedding_progress"] = EmbeddingProgress(**details["embedding_progress"])
+                
+                await StatusUpdateManager.update_task_status(task_id, updates)
+
+            # Start the task
+            processing_tasks[task_id] = asyncio.create_task(process_repository())
+            
+            # Return initial status
+            return IndexingStatusResponse(
+                repository_name=request.name,
+                status=ProcessingStatus.IN_PROGRESS,
+                progress=0.0,
+                processed_files=0,
+                generated_chunks=0,
+                processing_time=0.0
+            )
+        
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to start indexing: {str(e)}")
+
+
+@router.post("/repository/local", response_model=IndexingStatusResponse)
+async def index_repository_local(
+    request: LocalRepositoryIndexRequest,
+    background_tasks: BackgroundTasks,
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor),
+    dry_run: bool = QueryParam(default=False, description="Analyze and estimate without writing to Neo4j/Chroma")
+):
+    """
+    Index a local repository from filesystem path.
+    
+    This endpoint indexes a repository from a local filesystem path without
+    requiring git clone. Returns immediately with a task ID for status tracking.
+    """
     try:
-        # Create repository config
-        repo_config = RepositoryConfig(
+        # Validate local path exists and is directory
+        local_path = Path(request.local_path)
+        if not local_path.exists():
+            raise HTTPException(status_code=400, detail=f"Local path does not exist: {request.local_path}")
+        if not local_path.is_dir():
+            raise HTTPException(status_code=400, detail=f"Local path is not a directory: {request.local_path}")
+        
+        # Create local repository config
+        local_config = LocalRepositoryConfig(
             name=request.name,
-            url=str(request.url),
-            branch=request.branch,
+            path=str(local_path.absolute()),
             priority=request.priority,
             business_domain=request.business_domain,
             team_owner=request.team_owner,
-            maven_enabled=request.maven_enabled,
             is_golden_repo=request.is_golden_repo
         )
         
         # Start background processing
         task_id = f"{request.name}_{int(time.time())}"
-        
-        async def process_repository():
+        run_id = __import__("uuid").uuid4().hex
+
+        async def process_local_repository():
             try:
-                task_status[task_id] = {
-                    "repository_name": request.name,
-                    "status": ProcessingStatus.IN_PROGRESS,
-                    "progress": 0.0,
-                    "processed_files": 0,
-                    "generated_chunks": 0,
-                    "processing_time": 0.0,
-                    "error_message": None,
-                    "started_at": time.time()
-                }
+                # Initialize enhanced status tracking
+                task_status[task_id] = EnhancedIndexingStatus(
+                    repository_name=request.name,
+                    task_id=task_id,
+                    run_id=run_id,
+                    status=ProcessingStatus.IN_PROGRESS,
+                    current_stage=ProcessingStage.ANALYZING,
+                    started_at=datetime.now()
+                )
+
+                # Stage 1: Analysis (no cloning needed for local repos)
+                await StatusUpdateManager.add_stage_progress(
+                    task_id, ProcessingStage.ANALYZING,
+                    current_operation="Analyzing local repository structure"
+                )
                 
-                result = await processor.process_repository(repo_config)
+                start_time = time.time()
+
+                if dry_run:
+                    result = await processor.process_local_repository_dry_run(local_config, run_id=run_id)
+                else:
+                    # Enhanced processing with progress callbacks
+                    result = await processor.process_local_repository(
+                        local_config, 
+                        run_id=run_id,
+                        progress_callback=lambda stage, progress, details=None: 
+                            asyncio.create_task(_update_local_progress(stage, progress, details))
+                    )
+
+                await StatusUpdateManager.complete_stage(task_id)
                 
-                task_status[task_id].update({
+                # Update final status
+                await StatusUpdateManager.update_task_status(task_id, {
                     "status": result.status,
-                    "progress": 1.0,
+                    "current_stage": ProcessingStage.COMPLETED if result.status == ProcessingStatus.COMPLETED else ProcessingStage.FAILED,
+                    "overall_progress": 100.0,
                     "processed_files": result.processed_files,
                     "generated_chunks": result.generated_chunks,
-                    "processing_time": result.processing_time,
-                    "error_message": result.error_message
+                    "stored_chunks": result.generated_chunks,
+                    "processing_time": time.time() - start_time,
+                    "throughput_files_per_second": result.processed_files / max(time.time() - start_time, 1),
+                    "throughput_chunks_per_second": result.generated_chunks / max(time.time() - start_time, 1)
                 })
-                
+
+                if result.error_message:
+                    await StatusUpdateManager.add_error(
+                        task_id, "processing_error", result.error_message, recoverable=False
+                    )
+
             except Exception as e:
-                task_status[task_id].update({
+                await StatusUpdateManager.update_task_status(task_id, {
                     "status": ProcessingStatus.FAILED,
-                    "error_message": str(e)
+                    "current_stage": ProcessingStage.FAILED,
+                    "processing_time": time.time() - start_time if 'start_time' in locals() else 0
                 })
-        
+                await StatusUpdateManager.add_error(
+                    task_id, "unexpected_error", str(e), recoverable=False
+                )
+
+        async def _update_local_progress(stage: str, progress: float, details: Optional[Dict] = None):
+            """Internal progress update callback for local repositories."""
+            stage_mapping = {
+                "analyzing": ProcessingStage.ANALYZING,
+                "parsing": ProcessingStage.PARSING,
+                "embedding": ProcessingStage.EMBEDDING,
+                "storing": ProcessingStage.STORING,
+                "validating": ProcessingStage.VALIDATING
+            }
+            
+            processing_stage = stage_mapping.get(stage, ProcessingStage.ANALYZING)
+            
+            updates = {
+                "overall_progress": progress,
+                "current_stage": processing_stage
+            }
+            
+            if details:
+                if "current_file" in details:
+                    updates["current_file"] = details["current_file"]
+                if "processed_files" in details:
+                    updates["processed_files"] = details["processed_files"]
+                if "total_files" in details:
+                    updates["total_files"] = details["total_files"]
+                if "generated_chunks" in details:
+                    updates["generated_chunks"] = details["generated_chunks"]
+                if "embedding_progress" in details:
+                    updates["embedding_progress"] = EmbeddingProgress(**details["embedding_progress"])
+            
+            await StatusUpdateManager.update_task_status(task_id, updates)
+
         # Start the task
-        processing_tasks[task_id] = asyncio.create_task(process_repository())
+        processing_tasks[task_id] = asyncio.create_task(process_local_repository())
         
         # Return initial status
         return IndexingStatusResponse(
@@ -189,14 +654,14 @@ async def index_repository(
         )
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start indexing: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to start local indexing: {str(e)}")
 
 
 @router.post("/bulk")
 async def bulk_index_repositories(
     request: BulkIndexRequest,
     background_tasks: BackgroundTasks,
-    processor: RepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
 ):
     """
     Index multiple repositories in bulk.
@@ -225,37 +690,78 @@ async def bulk_index_repositories(
         
         async def process_bulk():
             try:
-                task_status[task_id] = {
-                    "task_type": "bulk_processing",
-                    "status": ProcessingStatus.IN_PROGRESS,
-                    "total_repositories": len(repo_configs),
-                    "completed_repositories": 0,
-                    "failed_repositories": 0,
-                    "progress": 0.0,
-                    "started_at": time.time(),
-                    "repository_results": []
-                }
+                # Initialize bulk processing status
+                task_status[task_id] = EnhancedIndexingStatus(
+                    repository_name=f"bulk_processing_{len(repo_configs)}_repos",
+                    task_id=task_id,
+                    run_id=f"bulk_{int(time.time())}",
+                    status=ProcessingStatus.IN_PROGRESS,
+                    current_stage=ProcessingStage.QUEUED,
+                    started_at=datetime.now(),
+                    total_files=len(repo_configs)  # Using total_files to track repositories
+                )
                 
-                # Process repositories
-                results = await processor.process_repositories(repo_configs)
+                await StatusUpdateManager.add_stage_progress(
+                    task_id, ProcessingStage.ANALYZING,
+                    current_operation=f"Processing {len(repo_configs)} repositories in bulk"
+                )
                 
-                # Update status
+                start_time = time.time()
+                
+                # Process repositories with progress tracking
+                results = []
+                for i, repo_config in enumerate(repo_configs):
+                    try:
+                        await StatusUpdateManager.update_task_status(task_id, {
+                            "current_file": f"Repository: {repo_config.name}",
+                            "processed_files": i,
+                            "overall_progress": (i / len(repo_configs)) * 100
+                        })
+                        
+                        result = await processor.process_repository(repo_config)
+                        results.append(result)
+                        
+                        if result.status == ProcessingStatus.FAILED:
+                            await StatusUpdateManager.add_error(
+                                task_id, "repository_failed", 
+                                f"Failed to process {repo_config.name}: {result.error_message}",
+                                recoverable=True
+                            )
+                        
+                    except Exception as e:
+                        await StatusUpdateManager.add_error(
+                            task_id, "repository_error",
+                            f"Error processing {repo_config.name}: {str(e)}",
+                            recoverable=True
+                        )
+                
+                # Calculate final statistics
                 completed = sum(1 for r in results if r.status == ProcessingStatus.COMPLETED)
                 failed = sum(1 for r in results if r.status == ProcessingStatus.FAILED)
+                total_chunks = sum(r.generated_chunks for r in results)
                 
-                task_status[task_id].update({
+                await StatusUpdateManager.update_task_status(task_id, {
                     "status": ProcessingStatus.COMPLETED,
-                    "completed_repositories": completed,
-                    "failed_repositories": failed,
-                    "progress": 1.0,
-                    "repository_results": [r.to_dict() for r in results]
+                    "current_stage": ProcessingStage.COMPLETED,
+                    "overall_progress": 100.0,
+                    "processed_files": len(repo_configs),
+                    "generated_chunks": total_chunks,
+                    "stored_chunks": total_chunks,
+                    "processing_time": time.time() - start_time
                 })
+                
+                # Store bulk results in a custom field (extend model if needed)
+                task_status[task_id].warnings.append(f"Bulk processing completed: {completed} successful, {failed} failed")
                 
             except Exception as e:
-                task_status[task_id].update({
+                await StatusUpdateManager.update_task_status(task_id, {
                     "status": ProcessingStatus.FAILED,
-                    "error_message": str(e)
+                    "current_stage": ProcessingStage.FAILED,
+                    "processing_time": time.time() - start_time if 'start_time' in locals() else 0
                 })
+                await StatusUpdateManager.add_error(
+                    task_id, "bulk_processing_error", str(e), recoverable=False
+                )
         
         # Start the task
         processing_tasks[task_id] = asyncio.create_task(process_bulk())
@@ -271,19 +777,20 @@ async def bulk_index_repositories(
         raise HTTPException(status_code=500, detail=f"Failed to start bulk indexing: {str(e)}")
 
 
-@router.get("/status/{task_id}")
+@router.get("/status/{task_id}", response_model=EnhancedIndexingStatus)
 async def get_indexing_status(task_id: str):
     """
-    Get the status of an indexing task.
+    Get the enhanced status of an indexing task.
     
-    This endpoint returns the current status and progress of an indexing task.
+    This endpoint returns comprehensive status and progress information
+    including stage tracking, embedding progress, and error details.
     """
     if task_id not in task_status:
         raise HTTPException(status_code=404, detail="Task not found")
     
     status = task_status[task_id]
     
-    # Check if task is complete
+    # Check if task is complete and clean up
     if task_id in processing_tasks:
         task = processing_tasks[task_id]
         if task.done():
@@ -292,20 +799,186 @@ async def get_indexing_status(task_id: str):
             
             # Update final status if needed
             if task.exception():
-                status.update({
+                await StatusUpdateManager.add_error(
+                    task_id, "task_exception", str(task.exception()), recoverable=False
+                )
+                await StatusUpdateManager.update_task_status(task_id, {
                     "status": ProcessingStatus.FAILED,
-                    "error_message": str(task.exception())
+                    "current_stage": ProcessingStage.FAILED
                 })
     
     return status
 
 
+@router.websocket("/status/{task_id}/stream")
+async def stream_indexing_status(websocket: WebSocket, task_id: str):
+    """
+    WebSocket endpoint for real-time indexing status updates.
+    
+    This endpoint provides live streaming of indexing progress including
+    stage transitions, embedding generation progress, and error notifications.
+    """
+    await websocket.accept()
+    
+    # Add client to active connections
+    if task_id not in active_websockets:
+        active_websockets[task_id] = []
+    active_websockets[task_id].append(websocket)
+    
+    try:
+        # Send initial status if task exists
+        if task_id in task_status:
+            initial_message = {
+                "type": "initial_status",
+                "task_id": task_id,
+                "data": task_status[task_id].dict()
+            }
+            await websocket.send_text(json.dumps(initial_message, default=str))
+        else:
+            error_message = {
+                "type": "error",
+                "message": f"Task {task_id} not found"
+            }
+            await websocket.send_text(json.dumps(error_message))
+            return
+        
+        # Keep connection alive and handle client messages
+        while True:
+            try:
+                # Wait for client messages (ping/pong, etc.)
+                message = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                
+                # Handle client messages
+                try:
+                    client_data = json.loads(message)
+                    if client_data.get("type") == "ping":
+                        pong_message = {"type": "pong", "timestamp": datetime.now().isoformat()}
+                        await websocket.send_text(json.dumps(pong_message))
+                except json.JSONDecodeError:
+                    # Ignore invalid JSON
+                    pass
+                    
+            except asyncio.TimeoutError:
+                # Send periodic heartbeat
+                heartbeat = {
+                    "type": "heartbeat",
+                    "timestamp": datetime.now().isoformat(),
+                    "task_id": task_id
+                }
+                await websocket.send_text(json.dumps(heartbeat))
+                
+    except WebSocketDisconnect:
+        # Client disconnected
+        pass
+    except Exception as e:
+        # Handle other errors
+        try:
+            error_message = {
+                "type": "error",
+                "message": f"WebSocket error: {str(e)}"
+            }
+            await websocket.send_text(json.dumps(error_message))
+        except:
+            pass
+    finally:
+        # Clean up connection
+        if task_id in active_websockets:
+            try:
+                active_websockets[task_id].remove(websocket)
+                if not active_websockets[task_id]:
+                    del active_websockets[task_id]
+            except ValueError:
+                pass
+
+
+@router.get("/status/{task_id}/logs")
+async def get_indexing_logs(task_id: str, level: str = QueryParam(default="INFO")):
+    """
+    Get detailed logs for an indexing task.
+    
+    This endpoint returns structured logs with filtering capabilities
+    for debugging and monitoring indexing operations.
+    """
+    if task_id not in task_status:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    status = task_status[task_id]
+    
+    # Compile logs from various sources
+    logs = []
+    
+    # Stage history logs
+    for stage_progress in status.stage_history:
+        logs.append({
+            "timestamp": stage_progress.started_at,
+            "level": "INFO",
+            "stage": stage_progress.stage,
+            "message": f"Stage {stage_progress.stage} started",
+            "details": {
+                "progress": stage_progress.progress_percentage,
+                "operation": stage_progress.current_operation
+            }
+        })
+        
+        if stage_progress.completed_at:
+            logs.append({
+                "timestamp": stage_progress.completed_at,
+                "level": "INFO",
+                "stage": stage_progress.stage,
+                "message": f"Stage {stage_progress.stage} completed",
+                "details": {
+                    "duration": (stage_progress.completed_at - stage_progress.started_at).total_seconds()
+                }
+            })
+    
+    # Error logs
+    for error in status.errors:
+        logs.append({
+            "timestamp": error.timestamp,
+            "level": "ERROR",
+            "stage": error.stage,
+            "message": error.error_message,
+            "details": {
+                "error_type": error.error_type,
+                "file_path": error.file_path,
+                "recoverable": error.recoverable
+            }
+        })
+    
+    # Warning logs
+    for warning in status.warnings:
+        logs.append({
+            "timestamp": datetime.now(),  # Warnings don't have timestamps in current model
+            "level": "WARNING",
+            "stage": status.current_stage,
+            "message": warning,
+            "details": {}
+        })
+    
+    # Sort by timestamp
+    logs.sort(key=lambda x: x["timestamp"])
+    
+    # Filter by level if specified
+    level_priority = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3}
+    min_level = level_priority.get(level.upper(), 1)
+    filtered_logs = [log for log in logs if level_priority.get(log["level"], 1) >= min_level]
+    
+    return {
+        "task_id": task_id,
+        "repository_name": status.repository_name,
+        "log_level": level,
+        "total_logs": len(filtered_logs),
+        "logs": filtered_logs
+    }
+
+
 @router.get("/status")
 async def get_all_indexing_status():
     """
-    Get the status of all indexing tasks.
+    Get the status of all indexing tasks with enhanced information.
     
-    This endpoint returns the status of all currently tracked indexing tasks.
+    This endpoint returns comprehensive status information for all tracked
+    indexing tasks including stage summaries and performance metrics.
     """
     # Clean up completed tasks
     completed_tasks = []
@@ -316,10 +989,167 @@ async def get_all_indexing_status():
     for task_id in completed_tasks:
         del processing_tasks[task_id]
     
+    # Calculate summary statistics
+    active_tasks = len(processing_tasks)
+    total_tasks = len(task_status)
+    
+    # Stage distribution
+    stage_counts = {}
+    status_counts = {}
+    total_files_processed = 0
+    total_chunks_generated = 0
+    
+    for status in task_status.values():
+        # Count by stage
+        stage = status.current_stage
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        
+        # Count by status
+        status_val = status.status
+        status_counts[status_val] = status_counts.get(status_val, 0) + 1
+        
+        # Aggregate metrics
+        total_files_processed += status.processed_files
+        total_chunks_generated += status.generated_chunks
+    
+    # Recent activity (last 10 tasks)
+    recent_tasks = sorted(
+        task_status.values(),
+        key=lambda x: x.started_at,
+        reverse=True
+    )[:10]
+    
     return {
-        "active_tasks": len(processing_tasks),
-        "total_tracked_tasks": len(task_status),
-        "task_statuses": task_status
+        "summary": {
+            "active_tasks": active_tasks,
+            "total_tracked_tasks": total_tasks,
+            "total_files_processed": total_files_processed,
+            "total_chunks_generated": total_chunks_generated,
+            "stage_distribution": stage_counts,
+            "status_distribution": status_counts
+        },
+        "recent_tasks": [
+            {
+                "task_id": task.task_id,
+                "repository_name": task.repository_name,
+                "status": task.status,
+                "current_stage": task.current_stage,
+                "progress": task.overall_progress,
+                "started_at": task.started_at,
+                "processing_time": task.processing_time,
+                "error_count": len(task.errors)
+            }
+            for task in recent_tasks
+        ],
+        "active_websocket_connections": sum(len(clients) for clients in active_websockets.values()),
+        "task_statuses": {task_id: status.dict() for task_id, status in task_status.items()}
+    }
+
+
+@router.get("/metrics/stages")
+async def get_stage_metrics():
+    """
+    Get detailed metrics about processing stages across all tasks.
+    
+    This endpoint provides insights into stage performance, bottlenecks,
+    and processing patterns for monitoring and optimization.
+    """
+    stage_metrics = {}
+    
+    for status in task_status.values():
+        for stage_progress in status.stage_history:
+            stage = stage_progress.stage
+            
+            if stage not in stage_metrics:
+                stage_metrics[stage] = {
+                    "total_executions": 0,
+                    "total_duration": 0.0,
+                    "average_duration": 0.0,
+                    "min_duration": float('inf'),
+                    "max_duration": 0.0,
+                    "success_count": 0,
+                    "error_count": 0,
+                    "current_active": 0
+                }
+            
+            metrics = stage_metrics[stage]
+            metrics["total_executions"] += 1
+            
+            if stage_progress.completed_at:
+                duration = (stage_progress.completed_at - stage_progress.started_at).total_seconds()
+                metrics["total_duration"] += duration
+                metrics["min_duration"] = min(metrics["min_duration"], duration)
+                metrics["max_duration"] = max(metrics["max_duration"], duration)
+                metrics["success_count"] += 1
+            else:
+                # Stage is still active
+                metrics["current_active"] += 1
+                
+                # Check if stage has errors
+                if stage_progress.error_message:
+                    metrics["error_count"] += 1
+    
+    # Calculate averages
+    for metrics in stage_metrics.values():
+        if metrics["success_count"] > 0:
+            metrics["average_duration"] = metrics["total_duration"] / metrics["success_count"]
+        if metrics["min_duration"] == float('inf'):
+            metrics["min_duration"] = 0.0
+    
+    return {
+        "stage_metrics": stage_metrics,
+        "total_stages_tracked": len(stage_metrics),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@router.get("/metrics/embedding")
+async def get_embedding_metrics():
+    """
+    Get detailed metrics about embedding generation across all tasks.
+    
+    This endpoint provides insights into embedding performance, throughput,
+    and quality metrics for CodeBERT processing optimization.
+    """
+    embedding_metrics = {
+        "total_chunks_embedded": 0,
+        "total_embedding_time": 0.0,
+        "average_embedding_rate": 0.0,
+        "active_embedding_tasks": 0,
+        "embedding_errors": 0,
+        "repositories_with_embeddings": 0,
+        "embedding_quality_metrics": {
+            "dimension_consistency": True,
+            "average_embedding_size": 0,
+            "null_embeddings": 0
+        }
+    }
+    
+    repositories_with_embeddings = set()
+    total_embedding_rates = []
+    
+    for status in task_status.values():
+        if status.embedding_progress.total_chunks > 0:
+            repositories_with_embeddings.add(status.repository_name)
+            embedding_metrics["total_chunks_embedded"] += status.embedding_progress.embedded_chunks
+            
+            if status.embedding_progress.embedding_rate > 0:
+                total_embedding_rates.append(status.embedding_progress.embedding_rate)
+            
+            embedding_metrics["embedding_errors"] += len(status.embedding_progress.embedding_errors)
+            
+            # Check if currently embedding
+            if status.current_stage == ProcessingStage.EMBEDDING:
+                embedding_metrics["active_embedding_tasks"] += 1
+    
+    embedding_metrics["repositories_with_embeddings"] = len(repositories_with_embeddings)
+    
+    if total_embedding_rates:
+        embedding_metrics["average_embedding_rate"] = sum(total_embedding_rates) / len(total_embedding_rates)
+    
+    return {
+        "embedding_metrics": embedding_metrics,
+        "timestamp": datetime.now().isoformat()
     }
 
 
@@ -327,7 +1157,7 @@ async def get_all_indexing_status():
 async def update_repository(
     repository_name: str,
     background_tasks: BackgroundTasks,
-    processor: RepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
 ):
     """
     Perform incremental update for a repository.
@@ -381,7 +1211,7 @@ async def update_repository(
 @router.delete("/repository/{repository_name}")
 async def delete_repository_index(
     repository_name: str,
-    processor: RepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
 ):
     """
     Delete a repository from the index.
@@ -394,14 +1224,14 @@ async def delete_repository_index(
         chroma_success = await processor.chroma_client.delete_repository(repository_name)
         
         # Delete from Neo4j
-        neo4j_query = {
-            "cypher": """
+        neo4j_query = GraphQuery(
+            cypher="""
             MATCH (r:Repository {name: $repository_name})
             DETACH DELETE r
             """,
-            "parameters": {"repository_name": repository_name},
-            "read_only": False
-        }
+            parameters={"repository_name": repository_name},
+            read_only=False
+        )
         
         await processor.neo4j_client.execute_query(neo4j_query)
         
@@ -419,7 +1249,7 @@ async def delete_repository_index(
 @router.post("/filter")
 async def filter_repositories(
     filter_request: RepositoryFilterRequest,
-    processor: RepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
 ):
     """
     Filter repositories based on criteria.
@@ -439,8 +1269,8 @@ async def filter_repositories(
         )
         
         # Get all repositories from Neo4j
-        query = {
-            "cypher": """
+        query = GraphQuery(
+            cypher="""
             MATCH (r:Repository)
             RETURN r.name as name, r.url as url, r.branch as branch,
                    r.priority as priority, r.business_domain as business_domain,
@@ -449,8 +1279,8 @@ async def filter_repositories(
                    r.lines_of_code as lines_of_code, r.chunks_count as chunks_count
             ORDER BY r.name
             """,
-            "read_only": True
-        }
+            read_only=True
+        )
         
         result = await processor.neo4j_client.execute_query(query)
         
@@ -502,7 +1332,7 @@ async def filter_repositories(
 async def list_repositories(
     limit: int = QueryParam(default=50, ge=1, le=200),
     offset: int = QueryParam(default=0, ge=0),
-    processor: RepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
 ):
     """
     List all indexed repositories.
@@ -510,8 +1340,8 @@ async def list_repositories(
     This endpoint returns a paginated list of all repositories in the system.
     """
     try:
-        query = {
-            "cypher": """
+        query = GraphQuery(
+            cypher="""
             MATCH (r:Repository)
             RETURN r.name as name, r.url as url, r.branch as branch,
                    r.priority as priority, r.business_domain as business_domain,
@@ -523,17 +1353,17 @@ async def list_repositories(
             SKIP $offset
             LIMIT $limit
             """,
-            "parameters": {"offset": offset, "limit": limit},
-            "read_only": True
-        }
+            parameters={"offset": offset, "limit": limit},
+            read_only=True
+        )
         
         result = await processor.neo4j_client.execute_query(query)
         
         # Get total count
-        count_query = {
-            "cypher": "MATCH (r:Repository) RETURN count(r) as total",
-            "read_only": True
-        }
+        count_query = GraphQuery(
+            cypher="MATCH (r:Repository) RETURN count(r) as total",
+            read_only=True
+        )
         
         count_result = await processor.neo4j_client.execute_query(count_query)
         total_count = count_result.records[0]['total'] if count_result.records else 0
@@ -555,7 +1385,7 @@ async def list_repositories(
 @router.get("/repositories/{repository_name}")
 async def get_repository_details(
     repository_name: str,
-    processor: RepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
 ):
     """
     Get detailed information about a specific repository.
@@ -565,8 +1395,8 @@ async def get_repository_details(
     """
     try:
         # Get repository info
-        query = {
-            "cypher": """
+        query = GraphQuery(
+            cypher="""
             MATCH (r:Repository {name: $repository_name})
             RETURN r.name as name, r.url as url, r.branch as branch,
                    r.priority as priority, r.business_domain as business_domain,
@@ -575,9 +1405,9 @@ async def get_repository_details(
                    r.lines_of_code as lines_of_code, r.chunks_count as chunks_count,
                    r.updated_at as updated_at
             """,
-            "parameters": {"repository_name": repository_name},
-            "read_only": True
-        }
+            parameters={"repository_name": repository_name},
+            read_only=True
+        )
         
         result = await processor.neo4j_client.execute_query(query)
         
@@ -603,7 +1433,7 @@ async def get_repository_details(
 
 @router.get("/statistics")
 async def get_indexing_statistics(
-    processor: RepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
 ):
     """
     Get indexing pipeline statistics.
@@ -627,7 +1457,7 @@ async def get_indexing_statistics(
 
 @router.post("/optimize")
 async def optimize_indices(
-    processor: RepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
 ):
     """
     Optimize database indices for better performance.
@@ -649,10 +1479,10 @@ async def optimize_indices(
         
         for query in optimization_queries:
             try:
-                await processor.neo4j_client.execute_query({
-                    "cypher": query,
-                    "read_only": False
-                })
+                await processor.neo4j_client.execute_query(GraphQuery(
+                    cypher=query,
+                    read_only=False
+                ))
             except Exception as e:
                 # Some optimization queries might fail if objects don't exist
                 continue

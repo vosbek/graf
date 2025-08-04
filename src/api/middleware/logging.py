@@ -5,6 +5,7 @@ Logging middleware for request/response logging and performance monitoring.
 import time
 import uuid
 import logging
+import re
 from typing import Callable
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware

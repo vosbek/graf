@@ -360,23 +360,23 @@ class RepositoryProcessor:
         
         return repo_path
     
+    def _run_command_sync(self, command: List[str], cwd: Optional[Path] = None) -> str:
+        """Run command synchronously for thread pool execution."""
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if result.returncode != 0:
+            raise Exception(f"Git command failed: {result.stderr}")
+        return result.stdout
+
     async def _run_git_command(self, command: List[str], cwd: Optional[Path] = None) -> str:
         """Run git command asynchronously."""
         loop = asyncio.get_event_loop()
-        
-        def run_command():
-            result = subprocess.run(
-                command,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-            if result.returncode != 0:
-                raise Exception(f"Git command failed: {result.stderr}")
-            return result.stdout
-        
-        return await loop.run_in_executor(self.thread_pool, run_command)
+        return await loop.run_in_executor(self.thread_pool, self._run_command_sync, command, cwd)
     
     async def _analyze_repository(self, repo_path: Path, repo_config: RepositoryConfig) -> Dict[str, Any]:
         """Analyze repository structure and characteristics."""
@@ -486,62 +486,61 @@ class RepositoryProcessor:
                                 files: List[Path], 
                                 repo_path: Path,
                                 repo_config: RepositoryConfig) -> Dict[str, Any]:
-        """Process a batch of files."""
-        loop = asyncio.get_event_loop()
+        """Process a batch of files asynchronously."""
+        batch_files = []
+        batch_chunks = []
         
-        def process_batch():
-            batch_files = []
-            batch_chunks = []
-            
-            for file_path in files:
-                try:
-                    # Read file content
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                    
-                    # Detect language
-                    language = self.tree_sitter_parser.detect_language(str(file_path), content)
-                    if not language:
-                        continue
-                    
-                    # Generate relative path
-                    rel_path = str(file_path.relative_to(repo_path))
-                    
-                    # Create chunking config
-                    chunking_config = ChunkingConfig(
-                        max_chunk_size=1000,
-                        min_chunk_size=100,
-                        include_context=True,
-                        semantic_splitting=True
-                    )
-                    
-                    # Create chunker with config
-                    chunker = CodeChunker(chunking_config)
-                    
-                    # Generate chunks
-                    chunks = chunker.chunk_file(rel_path, content, language)
-                    
-                    # Store file data
-                    file_data = {
-                        'path': rel_path,
-                        'language': language.value,
-                        'size': len(content),
-                        'lines': len(content.split('\n')),
-                        'chunks_count': len(chunks)
-                    }
-                    
-                    batch_files.append(file_data)
-                    batch_chunks.extend(chunks)
-                    
-                except Exception as e:
-                    self.logger.warning(f"Error processing file {file_path}: {e}")
-            
-            return {
-                'files': batch_files,
-                'chunks': batch_chunks
-            }
+        for file_path in files:
+            try:
+                # Read file content
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                
+                # Detect language
+                language = self.tree_sitter_parser.detect_language(str(file_path), content)
+                if not language:
+                    continue
+                
+                # Generate relative path
+                rel_path = str(file_path.relative_to(repo_path))
+                
+                # Create chunking config
+                chunking_config = ChunkingConfig(
+                    max_chunk_size=1000,
+                    min_chunk_size=100,
+                    include_context=True,
+                    semantic_splitting=True
+                )
+                
+                # Create chunker with config
+                chunker = CodeChunker(chunking_config)
+                
+                # Generate chunks
+                chunks = chunker.chunk_file(rel_path, content, language)
+                
+                # Store file data
+                file_data = {
+                    'path': rel_path,
+                    'language': language.value,
+                    'size': len(content),
+                    'lines': len(content.split('\n')),
+                    'chunks_count': len(chunks)
+                }
+                
+                batch_files.append(file_data)
+                batch_chunks.extend(chunks)
+                
+                # Yield control periodically for async processing
+                if len(batch_files) % 10 == 0:
+                    await asyncio.sleep(0)
+                
+            except Exception as e:
+                self.logger.warning(f"Error processing file {file_path}: {e}")
         
-        return await loop.run_in_executor(self.process_pool, process_batch)
+        return {
+            'files': batch_files,
+            'chunks': batch_chunks
+        }
     
     async def _process_maven_dependencies(self, 
                                         repo_path: Path, 
