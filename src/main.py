@@ -117,6 +117,8 @@ async def initialize_clients_async(app: FastAPI):
         neo4j_client = None
         repository_processor = None
         embedding_client = None
+        oracle_client = None
+        oracle_analyzer = None
 
         import os
         # Enforce ChromaDB REQUIRED: ignore CHROMA_DISABLED and always attempt init
@@ -191,6 +193,59 @@ async def initialize_clients_async(app: FastAPI):
             logger.warning(f"Embedding initialization skipped (non-blocking): {emb_e}")
             embedding_client = None
         
+        # Initialize Oracle client and analyzer (optional, based on settings)
+        logger.info("=== BACKGROUND INIT: Initializing Oracle integration (optional) ===")
+        try:
+            # Ensure Oracle config exists in settings
+            _ensure_bedrock_defaults(settings)
+            
+            # Check if Oracle is enabled
+            oracle_enabled = getattr(settings, 'oracle_enabled', False)
+            
+            if oracle_enabled:
+                def _import_and_create_oracle_client():
+                    from src.core.oracle_client import OracleDBClient
+                    return OracleDBClient(
+                        connection_string=getattr(settings, 'oracle_connection_string', None),
+                        username=getattr(settings, 'oracle_username', None),
+                        password=getattr(settings, 'oracle_password', None),
+                        schemas=getattr(settings, 'oracle_schemas', 'USER').split(','),
+                        max_connections=getattr(settings, 'oracle_max_connections', 5),
+                        schema_cache_ttl=getattr(settings, 'oracle_schema_cache_ttl', 3600)
+                    )
+                
+                oracle_client = await asyncio.to_thread(_import_and_create_oracle_client)
+                
+                # Initialize Oracle analyzer if both ChromaDB and Neo4j are available
+                if chroma_client and neo4j_client and oracle_client:
+                    def _create_oracle_analyzer():
+                        from src.services.oracle_analyzer import OracleDatabaseAnalyzer
+                        return OracleDatabaseAnalyzer(
+                            oracle_client=oracle_client,
+                            neo4j_client=neo4j_client,
+                            chroma_client=chroma_client
+                        )
+                    
+                    oracle_analyzer = await asyncio.to_thread(_create_oracle_analyzer)
+                    logger.info("Oracle database integration initialized", 
+                               oracle_enabled=True,
+                               schemas=oracle_client.schemas)
+                else:
+                    oracle_analyzer = None
+                    logger.warning("Oracle analyzer not created (missing dependencies)",
+                                 oracle_client=bool(oracle_client),
+                                 chroma_ready=bool(chroma_client),
+                                 neo4j_ready=bool(neo4j_client))
+            else:
+                logger.info("Oracle database integration disabled")
+                oracle_client = None
+                oracle_analyzer = None
+                
+        except Exception as oracle_e:
+            logger.warning(f"Oracle initialization skipped (optional): {oracle_e}")
+            oracle_client = None
+            oracle_analyzer = None
+
         # Initialize enhanced repository processor v2.0 (thread-free) only if dependencies are present
         if chroma_client and neo4j_client:
             repository_processor = EnhancedRepositoryProcessor(
@@ -205,13 +260,15 @@ async def initialize_clients_async(app: FastAPI):
             logger.warning("Repository processor not created (missing dependencies)", chroma_ready=bool(chroma_client), neo4j_ready=bool(neo4j_client))
         
         # Set clients in dependencies module
-        dependencies.set_clients(chroma_client, neo4j_client, repository_processor, embedding_client)
+        dependencies.set_clients(chroma_client, neo4j_client, repository_processor, embedding_client, oracle_client, oracle_analyzer)
         
         # Store clients in app state
         app.state.chroma_client = chroma_client
         app.state.neo4j_client = neo4j_client
         app.state.repository_processor = repository_processor
         app.state.embedding_client = embedding_client
+        app.state.oracle_client = oracle_client
+        app.state.oracle_analyzer = oracle_analyzer
 
         # Validate Bedrock/Chat config strictly to set chat feature flag
         try:
@@ -287,7 +344,7 @@ async def initialize_clients_async(app: FastAPI):
         
         # Ensure dependencies.* and app.state remain in sync for downstream accessors
         try:
-            dependencies.set_clients(chroma_client, neo4j_client, repository_processor, embedding_client)
+            dependencies.set_clients(chroma_client, neo4j_client, repository_processor, embedding_client, oracle_client, oracle_analyzer)
         except Exception as se:
             logger.warning(f"Dependency injection sync failed: {se}")
 
@@ -297,6 +354,8 @@ async def initialize_clients_async(app: FastAPI):
                    processor_initialized=repository_processor is not None,
                    processor_version="v2.0_enhanced" if repository_processor else "none",
                    codebert_available=embedding_client is not None,
+                   oracle_enabled=oracle_client is not None,
+                   oracle_analyzer_ready=oracle_analyzer is not None,
                    ready=app.state.is_ready)
 
     except Exception as e:
@@ -437,6 +496,8 @@ async def lifespan(app: FastAPI):
             app.state.neo4j_client = getattr(dependencies, "neo4j_client", getattr(app.state, "neo4j_client", None))
             app.state.repository_processor = getattr(dependencies, "repository_processor", getattr(app.state, "repository_processor", None))
             app.state.embedding_client = getattr(dependencies, "embedding_client", getattr(app.state, "embedding_client", None))
+            app.state.oracle_client = getattr(dependencies, "oracle_client", getattr(app.state, "oracle_client", None))
+            app.state.oracle_analyzer = getattr(dependencies, "oracle_analyzer", getattr(app.state, "oracle_analyzer", None))
         except Exception:
             # do not block startup on state mirroring
             pass
@@ -545,6 +606,14 @@ app.include_router(query.router, prefix="/api/v1/query", tags=["Query"])
 app.include_router(index.router, prefix="/api/v1/index", tags=["Indexing"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(diagnostics.router, prefix="/api/v1/diagnostics", tags=["Diagnostics"])
+
+# Oracle integration router (optional - only if Oracle is available)
+try:
+    from src.api.routes import oracle as oracle_router
+    app.include_router(oracle_router.router, prefix="/api/v1/oracle", tags=["Oracle"])
+    logger.info("Oracle database router registered", path="/api/v1/oracle/*")
+except Exception as e:
+    logger.info("Oracle router not available (optional)", error=str(e))
 
 # Graph visualization router (ensure registered once under /api/v1/graph)
 # Prefer the unified 'graph' router if present; fall back to legacy 'graph_visualization'
@@ -677,6 +746,8 @@ async def get_enhanced_state(request: Request):
             "neo4j_client": neo4j_attached,
             "repository_processor": bool(getattr(request.app.state, "repository_processor", None)),
             "embedding_client": bool(getattr(request.app.state, "embedding_client", None)),
+            "oracle_client": bool(getattr(request.app.state, "oracle_client", None)),
+            "oracle_analyzer": bool(getattr(request.app.state, "oracle_analyzer", None)),
         }
     }
 

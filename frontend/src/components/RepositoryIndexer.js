@@ -17,7 +17,7 @@ function RepositoryIndexer({ repositories, onRefresh }) {
   const [indexing, setIndexing] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
-  const { isReady, status, isLoading: healthLoading, error: healthError } = useSystemHealth();
+  const { isReady, status, isLoading: healthLoading, isInitialLoad, error: healthError } = useSystemHealth();
   
   // Real-time progress tracking
   const [indexingTask, setIndexingTask] = useState(null); // { taskId, repositoryName }
@@ -206,10 +206,10 @@ function RepositoryIndexer({ repositories, onRefresh }) {
     </Card>
   );
 
-  const readinessBanner = (!isReady || healthLoading || healthError) ? (
+  const readinessBanner = (!isReady || isInitialLoad || healthError) ? (
     <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 2 }}>
       {!isReady ? 'System is starting up. Indexing is disabled until the system is ready.' :
-       healthLoading ? 'Checking system readiness...' :
+       isInitialLoad ? 'Checking system readiness...' :
        `Health error: ${healthError}`}
     </Alert>
   ) : null;

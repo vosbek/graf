@@ -21,6 +21,9 @@
 ## 🚀 Quick Start (One Command)
 
 ```powershell
+# First-time setup: Check if your Windows machine is ready
+.\check-windows-setup.ps1
+
 # Start everything
 .\START.ps1
 
@@ -28,6 +31,10 @@
 ```
 
 **Access your GraphRAG system at:** http://localhost:3000
+
+> **🖥️ Fresh Windows Machine?** See [WINDOWS-FRESH-INSTALL.md](WINDOWS-FRESH-INSTALL.md) for complete setup guide.
+> 
+> **🤖 Want AI Chat?** See [AI-CHAT-SETUP.md](AI-CHAT-SETUP.md) to configure AWS Bedrock credentials.
 
 ---
 

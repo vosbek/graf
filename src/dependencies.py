@@ -14,6 +14,8 @@ chroma_client: Optional[object] = None  # ChromaDBClient
 neo4j_client: Optional[Neo4jClient] = None
 repository_processor: Optional[object] = None  # RepositoryProcessor or EnhancedRepositoryProcessor
 embedding_client: Optional[object] = None  # AsyncEnhancedEmbeddingClient
+oracle_client: Optional[object] = None  # OracleDBClient
+oracle_analyzer: Optional[object] = None  # OracleDatabaseAnalyzer
 
 # Configuration flags
 use_enhanced_processor: bool = True  # Switch to v2.0 processor
@@ -23,13 +25,17 @@ use_codebert: bool = True  # Use CodeBERT embeddings
 def set_clients(chroma: object,  # ChromaDBClient
                 neo4j: Neo4jClient, 
                 repo_processor: object,  # RepositoryProcessor or EnhancedRepositoryProcessor
-                embedding: Optional[object] = None):  # AsyncEnhancedEmbeddingClient
+                embedding: Optional[object] = None,  # AsyncEnhancedEmbeddingClient
+                oracle: Optional[object] = None,  # OracleDBClient
+                oracle_analyzer_instance: Optional[object] = None):  # OracleDatabaseAnalyzer
     """Set the global client instances."""
-    global chroma_client, neo4j_client, repository_processor, embedding_client
+    global chroma_client, neo4j_client, repository_processor, embedding_client, oracle_client, oracle_analyzer
     chroma_client = chroma
     neo4j_client = neo4j
     repository_processor = repo_processor
     embedding_client = embedding
+    oracle_client = oracle
+    oracle_analyzer = oracle_analyzer_instance
 
 
 def get_chroma_client() -> object:  # ChromaDBClient
@@ -58,6 +64,20 @@ def get_embedding_client() -> object:  # AsyncEnhancedEmbeddingClient
     if not embedding_client:
         raise HTTPException(status_code=503, detail="Embedding client not initialized")
     return embedding_client
+
+
+def get_oracle_client() -> object:  # OracleDBClient
+    """Get Oracle database client."""
+    if not oracle_client:
+        raise HTTPException(status_code=503, detail="Oracle client not initialized")
+    return oracle_client
+
+
+def get_oracle_analyzer() -> object:  # OracleDatabaseAnalyzer
+    """Get Oracle database analyzer."""
+    if not oracle_analyzer:
+        raise HTTPException(status_code=503, detail="Oracle analyzer not initialized")
+    return oracle_analyzer
 
 
 def create_enhanced_clients() -> tuple[object, object]:  # (AsyncEnhancedEmbeddingClient, EnhancedRepositoryProcessor)
@@ -99,6 +119,9 @@ def get_system_info() -> dict:
         'neo4j_client_loaded': neo4j_client is not None,
         'repository_processor_loaded': repository_processor is not None,
         'embedding_client_loaded': embedding_client is not None,
+        'oracle_client_loaded': oracle_client is not None,
+        'oracle_analyzer_loaded': oracle_analyzer is not None,
+        'oracle_enabled': oracle_client.enabled if oracle_client else False,
         'processor_type': 'enhanced_v2' if (repository_processor and 'EnhancedRepositoryProcessor' in str(type(repository_processor))) else 'legacy_v1',
         'use_enhanced_processor': use_enhanced_processor,
         'use_codebert': use_codebert,

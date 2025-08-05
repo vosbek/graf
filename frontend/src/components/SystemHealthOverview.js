@@ -1,10 +1,13 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Box, Typography, Grid, Card, CardContent, Alert,
-  LinearProgress, Chip, IconButton, Tooltip, CircularProgress
+  LinearProgress, Chip, IconButton, Tooltip, CircularProgress,
+  Button, Dialog, DialogTitle, DialogContent, DialogActions,
+  FormControlLabel, Checkbox, Snackbar
 } from '@mui/material';
 import {
-  Refresh, CheckCircle, Error, Warning, Assessment
+  Refresh, CheckCircle, Error, Warning, Assessment,
+  DeleteSweep, Backup
 } from '@mui/icons-material';
 import ServiceHealthIndicator from './ServiceHealthIndicator';
 import { useSystemHealth } from '../context/SystemHealthContext';
@@ -14,6 +17,17 @@ const SystemHealthOverview = ({
 }) => {
   // Rely solely on context; remove external callbacks/side-effects and internal timers
   const { data: healthData, error, isLoading, lastUpdated, refresh } = useSystemHealth();
+
+  // Database reset state
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [resetOptions, setResetOptions] = useState({
+    reset_neo4j: true,
+    reset_chromadb: true,
+    create_backup: false,
+    confirm: false
+  });
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetSnackbar, setResetSnackbar] = useState({ open: false, message: '', severity: 'info' });
 
   // Normalize backend payload to avoid false "unhealthy" when top-level is ready
   const normalizedChecks = React.useMemo(() => {
@@ -79,6 +93,59 @@ const SystemHealthOverview = ({
         service: name,
         error: check?.error || 'Service not ready'
       }));
+  };
+
+  // Database reset functions
+  const handleResetDatabases = async () => {
+    if (!resetOptions.confirm) {
+      setResetSnackbar({
+        open: true,
+        message: 'Please confirm the operation by checking the confirmation box',
+        severity: 'warning'
+      });
+      return;
+    }
+
+    setResetLoading(true);
+    try {
+      const response = await fetch('/api/v1/admin/database/reset', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(resetOptions),
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.success) {
+        setResetSnackbar({
+          open: true,
+          message: `Database reset successful! ${result.message}`,
+          severity: 'success'
+        });
+        setResetDialogOpen(false);
+        // Refresh system health after reset
+        setTimeout(() => refresh(), 2000);
+      } else {
+        throw new Error(result.detail || result.message || 'Database reset failed');
+      }
+    } catch (error) {
+      setResetSnackbar({
+        open: true,
+        message: `Database reset failed: ${error.message}`,
+        severity: 'error'
+      });
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const handleResetOptionChange = (option) => (event) => {
+    setResetOptions(prev => ({
+      ...prev,
+      [option]: event.target.checked
+    }));
   };
 
   if (compact) {
@@ -247,6 +314,156 @@ const SystemHealthOverview = ({
           })}
         </Grid>
       )}
+
+      {/* Database Reset Section */}
+      <Card sx={{ mt: 3 }}>
+        <CardContent>
+          <Box display="flex" alignItems="center" justifyContent="space-between" mb={2}>
+            <Typography variant="h6" gutterBottom>
+              Database Management
+            </Typography>
+            <Button
+              variant="outlined"
+              color="error"
+              startIcon={<DeleteSweep />}
+              onClick={() => setResetDialogOpen(true)}
+              disabled={resetLoading}
+            >
+              Reset Databases
+            </Button>
+          </Box>
+          
+          <Alert severity="info" sx={{ mb: 2 }}>
+            <Typography variant="body2">
+              Use database reset to clear Neo4j and ChromaDB for clean re-indexing with the enhanced business relationship extraction pipeline.
+              This is useful for testing the enhanced ingestion or clearing corrupted data.
+            </Typography>
+          </Alert>
+
+          <Grid container spacing={2}>
+            <Grid item xs={12} sm={6}>
+              <Typography variant="subtitle2" gutterBottom>
+                Neo4j Database
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Graph database containing business relationships, Struts actions, CORBA interfaces, and business rules.
+              </Typography>
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <Typography variant="subtitle2" gutterBottom>
+                ChromaDB Vector Store
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Vector database containing code embeddings and enhanced metadata for semantic search.
+              </Typography>
+            </Grid>
+          </Grid>
+        </CardContent>
+      </Card>
+
+      {/* Database Reset Dialog */}
+      <Dialog open={resetDialogOpen} onClose={() => setResetDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          <Box display="flex" alignItems="center" gap={1}>
+            <DeleteSweep color="error" />
+            Reset Databases
+          </Box>
+        </DialogTitle>
+        <DialogContent>
+          <Alert severity="warning" sx={{ mb: 3 }}>
+            <Typography variant="body2" gutterBottom>
+              <strong>⚠️ WARNING: This operation permanently deletes all data!</strong>
+            </Typography>
+            <Typography variant="body2">
+              This will clear all indexed repositories, business relationships, and embeddings. 
+              You will need to re-index your repositories after this operation.
+            </Typography>
+          </Alert>
+
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle1" gutterBottom>
+              Reset Options:
+            </Typography>
+            
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={resetOptions.reset_neo4j}
+                  onChange={handleResetOptionChange('reset_neo4j')}
+                />
+              }
+              label="Reset Neo4j (Business relationships, graph data)"
+            />
+            
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={resetOptions.reset_chromadb}
+                  onChange={handleResetOptionChange('reset_chromadb')}
+                />
+              }
+              label="Reset ChromaDB (Code embeddings, semantic search)"
+            />
+            
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={resetOptions.create_backup}
+                  onChange={handleResetOptionChange('create_backup')}
+                />
+              }
+              label={
+                <Box display="flex" alignItems="center" gap={1}>
+                  <Backup fontSize="small" />
+                  Create backup before reset (recommended)
+                </Box>
+              }
+            />
+          </Box>
+
+          <Alert severity="error" sx={{ mb: 2 }}>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={resetOptions.confirm}
+                  onChange={handleResetOptionChange('confirm')}
+                  color="error"
+                />
+              }
+              label="I understand this will permanently delete all data and cannot be undone"
+            />
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setResetDialogOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleResetDatabases}
+            color="error"
+            variant="contained"
+            disabled={!resetOptions.confirm || resetLoading}
+            startIcon={resetLoading ? <CircularProgress size={16} /> : <DeleteSweep />}
+          >
+            {resetLoading ? 'Resetting...' : 'Reset Databases'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Snackbar for reset notifications */}
+      <Snackbar
+        open={resetSnackbar.open}
+        autoHideDuration={6000}
+        onClose={() => setResetSnackbar({ ...resetSnackbar, open: false })}
+      >
+        <Alert
+          onClose={() => setResetSnackbar({ ...resetSnackbar, open: false })}
+          severity={resetSnackbar.severity}
+          sx={{ width: '100%' }}
+        >
+          {resetSnackbar.message}
+        </Alert>
+      </Snackbar>
 
       {healthData?.troubleshooting && (
         <Card sx={{ mt: 3 }}>

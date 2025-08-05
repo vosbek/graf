@@ -10,6 +10,8 @@ from .routes import health as health_routes
 from .routes.migration_plan import router as migration_plan_router
 from .routes.chat import router as chat_router
 from .routes.index import router as index_router
+from .routes.cross_repository import router as cross_repository_router
+from .routes.admin import router as admin_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -50,6 +52,8 @@ def create_app() -> FastAPI:
     # Mount feature routers (paths assume upstream usage at /api/v1/...)
     app.include_router(migration_plan_router, prefix="/api/v1/migration-plan", tags=["migration-plan"])
     app.include_router(chat_router, prefix="/api/v1/chat", tags=["chat"])
+    app.include_router(cross_repository_router, prefix="/api/v1/cross-repository", tags=["cross-repository"])
+    app.include_router(admin_router, prefix="/api/v1/admin", tags=["admin"])
 
     @app.on_event("startup")
     async def _on_startup():

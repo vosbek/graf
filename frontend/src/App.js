@@ -17,7 +17,7 @@ import RepositoryBrowser from './components/RepositoryBrowser';
 import DependencyGraph from './components/DependencyGraph';
 import MigrationPlanner from './components/MigrationPlanner';
 import RepositoryIndexer from './components/RepositoryIndexer';
-import MultiRepoAnalysis from './components/MultiRepoAnalysis';
+import CrossRepositoryAnalysis from './components/CrossRepositoryAnalysis';
 // Replace legacy SystemStatusDashboard import with SystemHealthOverview page if the former doesn't exist
 // If SystemStatusDashboard exists elsewhere, adjust the import accordingly.
 import SystemHealthOverview from './components/SystemHealthOverview';
@@ -42,7 +42,7 @@ const navigationItems = [
   { text: 'AI Chat', icon: <Chat />, path: '/chat', component: 'ChatInterface' },
   { text: 'Repository Browser', icon: <Code />, path: '/browse', component: 'RepositoryBrowser' },
   { text: 'Dependency Graph', icon: <AccountTree />, path: '/graph', component: 'DependencyGraph' },
-  { text: 'Multi-Repo Analysis', icon: <Business />, path: '/multi-repo', component: 'MultiRepoAnalysis' },
+  { text: 'Cross-Repository Analysis', icon: <Business />, path: '/cross-repo', component: 'CrossRepositoryAnalysis' },
   { text: 'Migration Planner', icon: <Assessment />, path: '/migrate', component: 'MigrationPlanner' },
   // Route label kept as System Status but routes to SystemHealthOverview
   { text: 'System Status', icon: <Storage />, path: '/status', component: 'SystemHealthOverview' }
@@ -148,8 +148,8 @@ function AppContent() {
         <RouteRenderer path="/graph">
           <DependencyGraph {...commonProps} />
         </RouteRenderer>
-        <RouteRenderer path="/multi-repo">
-          <MultiRepoAnalysis {...commonProps} />
+        <RouteRenderer path="/cross-repo">
+          <CrossRepositoryAnalysis {...commonProps} />
         </RouteRenderer>
         <RouteRenderer path="/migrate">
           <MigrationPlanner {...commonProps} />

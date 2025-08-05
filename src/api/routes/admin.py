@@ -12,6 +12,7 @@ from ...core.chromadb_client import ChromaDBClient
 from ...core.neo4j_client import Neo4jClient, GraphQuery
 from ...services.repository_processor import RepositoryProcessor
 from ...dependencies import get_chroma_client, get_neo4j_client, get_repository_processor
+from ...config.settings import get_settings
 
 
 router = APIRouter()
@@ -730,3 +731,241 @@ async def get_system_alerts():
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get alerts: {str(e)}")
+
+
+class DatabaseResetRequest(BaseModel):
+    """Request model for database reset operations."""
+    reset_neo4j: bool = Field(default=True, description="Reset Neo4j database")
+    reset_chromadb: bool = Field(default=True, description="Reset ChromaDB database")
+    create_backup: bool = Field(default=False, description="Create backup before reset")
+    confirm: bool = Field(default=False, description="Confirmation required for destructive operation")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "reset_neo4j": True,
+                "reset_chromadb": True, 
+                "create_backup": True,
+                "confirm": True
+            }
+        }
+
+
+class DatabaseResetResponse(BaseModel):
+    """Response model for database reset operations."""
+    success: bool = Field(..., description="Whether the operation succeeded")
+    message: str = Field(..., description="Result message")
+    neo4j_result: Optional[Dict[str, Any]] = Field(None, description="Neo4j reset results")
+    chromadb_result: Optional[Dict[str, Any]] = Field(None, description="ChromaDB reset results")
+    backup_paths: Optional[List[str]] = Field(None, description="Backup file paths created")
+    timestamp: float = Field(..., description="Operation timestamp")
+
+
+@router.post("/database/reset", response_model=DatabaseResetResponse)
+async def reset_databases(
+    request: DatabaseResetRequest,
+    neo4j_client: Neo4jClient = Depends(get_neo4j_client),
+    chroma_client: ChromaDBClient = Depends(get_chroma_client)
+):
+    """
+    Reset Neo4j and/or ChromaDB databases for clean re-indexing.
+    
+    ⚠️ WARNING: This operation permanently deletes all data!
+    
+    This endpoint clears the specified databases to enable clean re-indexing
+    with the enhanced business relationship extraction pipeline.
+    
+    Use cases:
+    - Clean testing with enhanced ingestion
+    - Clearing corrupted data
+    - Schema migration preparation
+    - Development environment reset
+    """
+    if not request.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation required. Set 'confirm': true to proceed with this destructive operation."
+        )
+    
+    if not request.reset_neo4j and not request.reset_chromadb:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one database must be selected for reset."
+        )
+    
+    try:
+        settings = get_settings()
+        results = {
+            "success": True,
+            "message": "Database reset completed successfully",
+            "neo4j_result": None,
+            "chromadb_result": None,
+            "backup_paths": [],
+            "timestamp": time.time()
+        }
+        
+        # Create backups if requested
+        if request.create_backup:
+            from pathlib import Path
+            import json
+            
+            backup_dir = Path("backups")
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            
+            if request.reset_neo4j:
+                try:
+                    # Simple Neo4j data export (fallback if APOC not available)
+                    backup_file = backup_dir / f"neo4j_simple_backup_{int(time.time())}.json"
+                    
+                    # Get basic statistics for backup
+                    stats_query = GraphQuery(
+                        cypher="MATCH (n) RETURN count(n) as total_nodes",
+                        read_only=True
+                    )
+                    stats_result = await neo4j_client.execute_query(stats_query)
+                    
+                    backup_data = {
+                        "timestamp": time.time(),
+                        "database": "neo4j",
+                        "total_nodes": stats_result.records[0]["total_nodes"] if stats_result.records else 0,
+                        "note": "Basic backup - full export requires APOC plugin"
+                    }
+                    
+                    with open(backup_file, 'w') as f:
+                        json.dump(backup_data, f, indent=2)
+                    
+                    results["backup_paths"].append(str(backup_file))
+                    
+                except Exception as e:
+                    # Backup failure shouldn't stop the reset
+                    results["message"] += f" (Neo4j backup failed: {str(e)})"
+            
+            if request.reset_chromadb:
+                try:
+                    # ChromaDB backup
+                    backup_file = backup_dir / f"chromadb_backup_{int(time.time())}.json"
+                    
+                    collections = chroma_client.list_collections()
+                    backup_data = {
+                        "timestamp": time.time(),
+                        "database": "chromadb",
+                        "collections": {}
+                    }
+                    
+                    for collection in collections:
+                        try:
+                            count = collection.count()
+                            backup_data["collections"][collection.name] = {"count": count}
+                        except Exception:
+                            backup_data["collections"][collection.name] = {"count": "unknown"}
+                    
+                    with open(backup_file, 'w') as f:
+                        json.dump(backup_data, f, indent=2)
+                    
+                    results["backup_paths"].append(str(backup_file))
+                    
+                except Exception as e:
+                    results["message"] += f" (ChromaDB backup failed: {str(e)})"
+        
+        # Reset Neo4j
+        if request.reset_neo4j:
+            try:
+                # Get stats before deletion
+                stats_before_query = GraphQuery(
+                    cypher="MATCH (n) RETURN count(n) as nodes",
+                    read_only=True
+                )
+                stats_before = await neo4j_client.execute_query(stats_before_query)
+                nodes_before = stats_before.records[0]["nodes"] if stats_before.records else 0
+                
+                # Delete all relationships
+                del_rels_query = GraphQuery(
+                    cypher="MATCH ()-[r]->() DELETE r",
+                    read_only=False
+                )
+                await neo4j_client.execute_query(del_rels_query)
+                
+                # Delete all nodes  
+                del_nodes_query = GraphQuery(
+                    cypher="MATCH (n) DELETE n",
+                    read_only=False
+                )
+                await neo4j_client.execute_query(del_nodes_query)
+                
+                # Recreate schema (if Neo4j client has create_schema method)
+                if hasattr(neo4j_client, 'create_schema'):
+                    await neo4j_client.create_schema()
+                
+                # Get stats after deletion
+                stats_after_query = GraphQuery(
+                    cypher="MATCH (n) RETURN count(n) as nodes",
+                    read_only=True  
+                )
+                stats_after = await neo4j_client.execute_query(stats_after_query)
+                nodes_after = stats_after.records[0]["nodes"] if stats_after.records else 0
+                
+                results["neo4j_result"] = {
+                    "success": True,
+                    "nodes_deleted": nodes_before,
+                    "nodes_remaining": nodes_after,
+                    "schema_recreated": hasattr(neo4j_client, 'create_schema')
+                }
+                
+            except Exception as e:
+                results["success"] = False
+                results["neo4j_result"] = {
+                    "success": False,
+                    "error": str(e)
+                }
+                results["message"] = f"Neo4j reset failed: {str(e)}"
+        
+        # Reset ChromaDB
+        if request.reset_chromadb:
+            try:
+                # Get collections before deletion
+                collections_before = chroma_client.list_collections()
+                collections_deleted = []
+                
+                # Delete all collections
+                for collection in collections_before:
+                    try:
+                        chroma_client.delete_collection(collection.name)
+                        collections_deleted.append(collection.name)
+                    except Exception as e:
+                        # Continue with other collections
+                        pass
+                
+                # Recreate main collection
+                try:
+                    chroma_client.create_collection(
+                        name=settings.chroma_collection_name,
+                        metadata={"description": "Enhanced codebase RAG collection"}
+                    )
+                    main_collection_recreated = True
+                except Exception:
+                    main_collection_recreated = False
+                
+                results["chromadb_result"] = {
+                    "success": True,
+                    "collections_deleted": collections_deleted,
+                    "main_collection_recreated": main_collection_recreated
+                }
+                
+            except Exception as e:
+                results["success"] = False
+                results["chromadb_result"] = {
+                    "success": False,
+                    "error": str(e)
+                }
+                if results["message"] == "Database reset completed successfully":
+                    results["message"] = f"ChromaDB reset failed: {str(e)}"
+                else:
+                    results["message"] += f"; ChromaDB reset failed: {str(e)}"
+        
+        return DatabaseResetResponse(**results)
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database reset operation failed: {str(e)}"
+        )

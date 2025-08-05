@@ -23,6 +23,7 @@ export function SystemHealthProvider({ children, intervalMs = ENV_POLL_INTERVAL,
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
 
   const timerRef = useRef(null);
@@ -53,9 +54,12 @@ export function SystemHealthProvider({ children, intervalMs = ENV_POLL_INTERVAL,
     const id = ++pollIdRef.current;
     const t0 = Date.now();
     try {
-      setIsLoading(true);
+      // Only show loading state on initial load or manual refresh, not on routine polls
+      if (isInitialLoad) {
+        setIsLoading(true);
+      }
       setError('');
-      dlog('poll:start', { id, backoffMs: backoffRef.current });
+      dlog('poll:start', { id, backoffMs: backoffRef.current, isInitialLoad });
       const status = await ApiService.getSystemStatus();
       // If server returned an error envelope, normalize
       if (status && typeof status === 'object' && status.status) {
@@ -69,6 +73,10 @@ export function SystemHealthProvider({ children, intervalMs = ENV_POLL_INTERVAL,
         });
       }
       setLastUpdated(new Date());
+      // Mark initial load as complete
+      if (isInitialLoad) {
+        setIsInitialLoad(false);
+      }
       // reset backoff on success
       backoffRef.current = intervalMs;
       dlog('poll:success', { id, ms: Date.now() - t0 });
@@ -82,14 +90,18 @@ export function SystemHealthProvider({ children, intervalMs = ENV_POLL_INTERVAL,
       dlog('poll:error', { id, ms: Date.now() - t0, message: msg, nextDelay: next });
       scheduleNextPoll(next);
     } finally {
-      setIsLoading(false);
+      if (isInitialLoad) {
+        setIsLoading(false);
+      }
     }
-  }, [intervalMs, maxBackoffMs, scheduleNextPoll, disablePolling]);
+  }, [intervalMs, maxBackoffMs, scheduleNextPoll, disablePolling, isInitialLoad]);
 
   const refresh = useCallback(() => {
     // Manual refresh resets backoff and polls immediately
+    // For manual refresh, we want to show loading state
     backoffRef.current = intervalMs;
     if (timerRef.current) clearTimeout(timerRef.current);
+    setIsInitialLoad(true); // Treat manual refresh like initial load
     dlog('refresh');
     poll();
   }, [intervalMs, poll]);
@@ -124,6 +136,7 @@ export function SystemHealthProvider({ children, intervalMs = ENV_POLL_INTERVAL,
     lastUpdated,
     error,
     isLoading,
+    isInitialLoad,
     isReady,
     refresh
   };

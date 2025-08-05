@@ -275,33 +275,124 @@ async def get_visualization(
             }
         )
 
-    # Minimal, schema-tolerant Cypher (one-hop) to guarantee a non-error response on heterogeneous data
+    # ENHANCED: Multi-hop business-aware Cypher query for deep relationship visualization
     cypher = """
     MATCH (r:Repository {name: $repository})
     WITH r
-    OPTIONAL MATCH (r)-[e]-(n)
-    WITH r, e, n
-    LIMIT $limit_edges
+    
+    // Get all business components and their relationships
+    OPTIONAL MATCH (r)-[:CONTAINS_STRUTS_ACTION]->(sa:StrutsAction)
+    OPTIONAL MATCH (r)-[:CONTAINS_CORBA_INTERFACE]->(ci:CORBAInterface)  
+    OPTIONAL MATCH (r)-[:CONTAINS_JSP_COMPONENT]->(jsp:JSPComponent)
+    OPTIONAL MATCH (r)-[:CONTAINS]->(f:File)
+    OPTIONAL MATCH (br:BusinessRule)
+    WHERE br.file_path STARTS WITH f.path OR EXISTS {
+        MATCH (f)-[:IMPLEMENTS_BUSINESS_RULE]->(br)
+    }
+    
+    // Get business relationships (up to specified depth)
+    OPTIONAL MATCH path = (sa)-[:IMPLEMENTS_BUSINESS_RULE|CALLS_SERVICE|USES_DATA*1..$depth]-(target)
+    WHERE target <> sa
+    
+    // Collect all nodes with business context
+    WITH r, 
+         collect(DISTINCT sa) as struts_actions,
+         collect(DISTINCT ci) as corba_interfaces,
+         collect(DISTINCT jsp) as jsp_components,
+         collect(DISTINCT f) as files,
+         collect(DISTINCT br) as business_rules,
+         collect(DISTINCT target) as connected_targets,
+         collect(DISTINCT path) as business_paths
+    
+    // Build comprehensive node list
     WITH collect(DISTINCT {
       id: coalesce(r.id, toString(id(r))),
       labels: labels(r),
       name: coalesce(r.name, toString(id(r))),
       path: coalesce(r.path, ''),
-      size: coalesce(r.size, 0)
-    }) AS repoNode,
+      size: coalesce(r.size, 0),
+      type: 'repository',
+      business_context: {
+        struts_actions: size(struts_actions),
+        corba_interfaces: size(corba_interfaces),
+        jsp_components: size(jsp_components),
+        business_rules: size(business_rules)
+      }
+    }) AS repoNodes,
+    
+    // Struts Action nodes
+    [sa IN struts_actions | {
+      id: coalesce(sa.path, toString(id(sa))),
+      labels: labels(sa),
+      name: coalesce(sa.path, toString(id(sa))),
+      path: coalesce(sa.file_path, ''),
+      size: 1,
+      type: 'struts_action',
+      business_purpose: coalesce(sa.business_purpose, ''),
+      migration_complexity: 'medium'
+    }][0..$limit_nodes] AS strutsNodes,
+    
+    // CORBA Interface nodes  
+    [ci IN corba_interfaces | {
+      id: coalesce(ci.name, toString(id(ci))),
+      labels: labels(ci),
+      name: coalesce(ci.name, toString(id(ci))),
+      path: coalesce(ci.file_path, ''),
+      size: size(coalesce(ci.operations, [])),
+      type: 'corba_interface',
+      operations: coalesce(ci.operations, []),
+      migration_complexity: 'high'
+    }][0..$limit_nodes] AS corbaNodes,
+    
+    // JSP Component nodes
+    [jsp IN jsp_components | {
+      id: coalesce(jsp.id, toString(id(jsp))),
+      labels: labels(jsp),
+      name: coalesce(jsp.id, toString(id(jsp))),
+      path: coalesce(jsp.file_path, ''),
+      size: 1,
+      type: 'jsp_component',
+      business_purpose: coalesce(jsp.business_purpose, ''),
+      migration_notes: coalesce(jsp.migration_notes, [])
+    }][0..$limit_nodes] AS jspNodes,
+    
+    // Business Rule nodes
+    [br IN business_rules | {
+      id: coalesce(br.id, toString(id(br))),
+      labels: labels(br),
+      name: coalesce(br.rule_text, toString(id(br)))[0..50] + '...',
+      path: coalesce(br.file_path, ''),
+      size: 1,
+      type: 'business_rule',
+      domain: coalesce(br.domain, 'general'),
+      complexity: coalesce(br.complexity, 'medium'),
+      rule_type: coalesce(br.rule_type, 'validation')
+    }][0..$limit_nodes] AS businessRuleNodes
+    
+    // Get all relationships between business components
+    WITH repoNodes + strutsNodes + corbaNodes + jspNodes + businessRuleNodes AS allNodes
+    
+    MATCH (r:Repository {name: $repository})
+    OPTIONAL MATCH (r)-[e1]-(n1)
+    WHERE n1:StrutsAction OR n1:CORBAInterface OR n1:JSPComponent OR n1:BusinessRule OR n1:File
+    
+    OPTIONAL MATCH (n1)-[e2]-(n2) 
+    WHERE n2:StrutsAction OR n2:CORBAInterface OR n2:JSPComponent OR n2:BusinessRule
+    
+    WITH allNodes,
     collect(DISTINCT {
-      id: coalesce(n.id, toString(id(n))),
-      labels: labels(n),
-      name: coalesce(n.name, n.artifactId, n.path, n.title, toString(id(n))),
-      path: coalesce(n.path, ''),
-      size: coalesce(n.size, n.count, 0)
-    })[0..$limit_nodes] AS neighborNodes,
-    collect(DISTINCT {
-      source: coalesce(startNode(e).id, toString(id(startNode(e)))),
-      target: coalesce(endNode(e).id, toString(id(endNode(e)))),
-      type: type(e)
-    })[0..$limit_edges] AS edgeList
-    RETURN repoNode + neighborNodes AS nodes, edgeList AS edges
+      source: coalesce(startNode(e1).id, startNode(e1).path, startNode(e1).name, toString(id(startNode(e1)))),
+      target: coalesce(endNode(e1).id, endNode(e1).path, endNode(e1).name, toString(id(endNode(e1)))),
+      type: type(e1),
+      relationship_type: type(e1)
+    }) + collect(DISTINCT {
+      source: coalesce(startNode(e2).id, startNode(e2).path, startNode(e2).name, toString(id(startNode(e2)))),
+      target: coalesce(endNode(e2).id, endNode(e2).path, endNode(e2).name, toString(id(endNode(e2)))),
+      type: type(e2),
+      relationship_type: type(e2)
+    }) AS allEdges
+    
+    RETURN allNodes[0..$limit_nodes] AS nodes, allEdges[0..$limit_edges] AS edges
     """
 
     # Normalize/validate params to primitives to avoid driver coercion issues

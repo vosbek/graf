@@ -19,7 +19,7 @@ function Dashboard({ repositories }) {
   const [loading, setLoading] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [systemDiagnostics, setSystemDiagnostics] = useState(null);
-  const { isReady, isLoading: healthLoading, error: healthError, refresh } = useSystemHealth();
+  const { isReady, isLoading: healthLoading, isInitialLoad, error: healthError, refresh } = useSystemHealth();
 
   // Gate dashboard data by readiness to avoid premature calls
   useEffect(() => {
@@ -69,10 +69,10 @@ function Dashboard({ repositories }) {
     }
   };
 
-  const readinessBanner = (!isReady || healthLoading || healthError) ? (
+  const readinessBanner = (!isReady || isInitialLoad || healthError) ? (
     <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 3 }}>
       {!isReady ? 'System is starting up. Dashboard metrics will appear once the system is ready.' :
-       healthLoading ? 'Checking system readiness...' :
+       isInitialLoad ? 'Checking system readiness...' :
        `Health error: ${healthError}`}
     </Alert>
   ) : null;

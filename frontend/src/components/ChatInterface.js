@@ -13,13 +13,13 @@ function ChatInterface({ repositories }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const { isReady, isLoading: healthLoading, error: healthError } = useSystemHealth();
+  const { isReady, isLoading: healthLoading, isInitialLoad, error: healthError } = useSystemHealth();
   const listRef = useRef(null);
 
-  const readinessBanner = (!isReady || healthLoading || healthError) ? (
+  const readinessBanner = (!isReady || isInitialLoad || healthError) ? (
     <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 2 }}>
       {!isReady ? 'System is starting up. Chat is disabled until the system is ready.' :
-       healthLoading ? 'Checking system readiness...' :
+       isInitialLoad ? 'Checking system readiness...' :
        `Health error: ${healthError}`}
     </Alert>
   ) : null;

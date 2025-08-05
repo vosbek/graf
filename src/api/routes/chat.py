@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, validator
 
 # Dependencies are resolved by the application; they should be lightweight to import
-from ...dependencies import get_chroma_client, get_neo4j_client  # type: ignore
+from ...dependencies import get_chroma_client, get_neo4j_client, get_oracle_client  # type: ignore
 from ...config.settings import settings  # to read Bedrock/LLM fields
 
 
@@ -77,6 +77,17 @@ async def chat_ask(
     # Build tools (DI clients are already validated by app startup)
     chroma_tool = ChromaTool(chroma_client)
     neo4j_tool = Neo4jTool(neo4j_client)
+    
+    # Get Oracle client (optional - may be None if Oracle integration disabled)
+    oracle_tool = None
+    try:
+        oracle_client = get_oracle_client()
+        if oracle_client and oracle_client.enabled:
+            from strands.tools.oracle_tool import OracleTool  # type: ignore
+            oracle_tool = OracleTool(oracle_client)
+    except Exception:
+        # Oracle integration is optional - continue without it
+        oracle_tool = None
 
     # Construct Bedrock provider from Settings and validate strictly (no fallbacks)
     cfg = BedrockConfig(
@@ -96,10 +107,11 @@ async def chat_ask(
         # Provider not valid; do not proceed (router should have been gated at startup, but double-check here)
         raise HTTPException(status_code=503, detail=f"Bedrock provider invalid: {e}")
 
-    # Construct the deterministic agent
+    # Construct the deterministic agent with Oracle tool
     agent = ChatAgent(
         chroma_tool=chroma_tool,
         neo4j_tool=neo4j_tool,
+        oracle_tool=oracle_tool,
         llm_provider=provider,
         settings=settings,
     )

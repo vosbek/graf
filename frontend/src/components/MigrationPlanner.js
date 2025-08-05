@@ -14,7 +14,7 @@ function MigrationPlanner({ repositories }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const { isReady, isLoading: healthLoading, error: healthError } = useSystemHealth();
+  const { isReady, isLoading: healthLoading, isInitialLoad, error: healthError } = useSystemHealth();
 
   const generateMigrationPlan = async () => {
     if (!isReady) {
@@ -57,10 +57,10 @@ function MigrationPlanner({ repositories }) {
         Generate AI-powered migration recommendations, cross-repository impact, and GraphQL schema suggestions.
       </Typography>
 
-      {(!isReady || healthLoading || healthError) && (
+      {(!isReady || isInitialLoad || healthError) && (
         <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 2 }}>
           {!isReady ? 'System is starting up. Planning is disabled until the system is ready.' :
-           healthLoading ? 'Checking system readiness...' :
+           isInitialLoad ? 'Checking system readiness...' :
            `Health error: ${healthError}`}
         </Alert>
       )}

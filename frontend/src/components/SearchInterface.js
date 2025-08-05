@@ -12,7 +12,7 @@ function SearchInterface({ repositories }) {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const { isReady, isLoading: healthLoading, error: healthError } = useSystemHealth();
+  const { isReady, isLoading: healthLoading, isInitialLoad, error: healthError } = useSystemHealth();
 
   const handleSearch = async () => {
     if (!isReady) {
@@ -43,10 +43,10 @@ function SearchInterface({ repositories }) {
     }
   };
 
-  const readinessBanner = (!isReady || healthLoading || healthError) ? (
+  const readinessBanner = (!isReady || isInitialLoad || healthError) ? (
     <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 3 }}>
       {!isReady ? 'System is starting up. Search is disabled until the system is ready.' :
-       healthLoading ? 'Checking system readiness...' :
+       isInitialLoad ? 'Checking system readiness...' :
        `Health error: ${healthError}`}
     </Alert>
   ) : null;

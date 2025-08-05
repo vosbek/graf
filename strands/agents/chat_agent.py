@@ -26,11 +26,13 @@ class ChatAgent:
         self,
         chroma_tool: Any = None,
         neo4j_tool: Any = None,
+        oracle_tool: Any = None,
         llm_provider: Any = None,
         settings: Any = None,
     ):
         self._chroma_tool = chroma_tool
         self._neo4j_tool = neo4j_tool
+        self._oracle_tool = oracle_tool
         self._llm_provider = llm_provider
         self._settings = settings
 
@@ -116,6 +118,7 @@ class ChatAgent:
         graph_summary: Optional[Dict[str, Any]],
         max_tokens: int,
         diagram_mode: bool = False,
+        oracle_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Deterministic prompt assembly. We cap size by count and snippet length rather than tokenizing.
@@ -166,9 +169,43 @@ class ChatAgent:
                 lines.append(f"- Integration: {ip.get('source','')} -> {ip.get('target','')} ({ip.get('count',0)})")
             lines.append("")
 
+        # Add Oracle database information if available
+        if oracle_data and oracle_data.get('data_sources'):
+            lines.append("Oracle Database Information:")
+            field_name = oracle_data.get('field_name', 'field')
+            confidence = oracle_data.get('confidence', 0.0)
+            lines.append(f"Field: {field_name} (confidence: {confidence:.2f})")
+            
+            for i, source in enumerate(oracle_data['data_sources'][:3], 1):  # Top 3 sources
+                table = source.get('table', '')
+                column = source.get('column', '')
+                schema = source.get('schema', '')
+                purpose = source.get('business_purpose', '')
+                data_type = source.get('data_type', '')
+                
+                lines.append(f"{i}) Oracle Table: {schema}.{table}")
+                lines.append(f"   Column: {column} ({data_type})")
+                if purpose:
+                    lines.append(f"   Purpose: {purpose}")
+            
+            # Add business rules if available
+            if oracle_data.get('business_rules'):
+                lines.append("Business Rules:")
+                for rule in oracle_data['business_rules'][:3]:
+                    lines.append(f"- {rule}")
+            
+            # Add related procedures if available
+            if oracle_data.get('related_procedures'):
+                lines.append("Related Procedures:")
+                for proc in oracle_data['related_procedures'][:3]:
+                    lines.append(f"- {proc}")
+                    
+            lines.append("")
+
         lines.append("Answer policy:")
         lines.append("- Do not fabricate. If unsure, say what is missing.")
         lines.append("- Cite sources inline like: [chunk: CHUNK_ID | path: FILE_PATH].")
+        lines.append("- For Oracle data sources, cite as: [oracle: SCHEMA.TABLE.COLUMN].")
         if diagram_mode:
             lines.append("")
             lines.append("Diagram mode requirements (mandatory when helpful):")
@@ -182,6 +219,102 @@ class ChatAgent:
             lines.append("- Ensure Mermaid syntax is valid. Place the diagram after the explanation.")
 
         return "\n".join(lines)
+
+    async def _check_oracle_data_sources(self, question: str) -> Optional[Dict[str, Any]]:
+        """
+        Check if question is asking about data sources and use Oracle tool if available.
+        
+        Returns Oracle data source information if relevant, None otherwise.
+        """
+        if not self._oracle_tool:
+            return None
+        
+        # Keywords that indicate data source questions
+        data_source_keywords = [
+            'where does', 'data source', 'comes from', 'gets its data',
+            'field source', 'database table', 'oracle table', 'column',
+            'specified amount', 'data flow', 'business rule'
+        ]
+        
+        question_lower = question.lower()
+        if not any(keyword in question_lower for keyword in data_source_keywords):
+            return None
+        
+        try:
+            # Extract field name from question (simple heuristic)
+            field_name = self._extract_field_name(question)
+            
+            # Extract business context if present
+            context = self._extract_business_context(question)
+            
+            # Use Oracle tool to find data source
+            oracle_result = await self._oracle_tool.find_data_source(field_name, context)
+            
+            if oracle_result and oracle_result.get('data_sources'):
+                return oracle_result
+                
+        except Exception as e:
+            # Don't fail the whole request if Oracle lookup fails
+            pass
+        
+        return None
+    
+    def _extract_field_name(self, question: str) -> str:
+        """Extract field name from question using simple heuristics."""
+        question_lower = question.lower()
+        
+        # Look for quoted field names
+        import re
+        quoted_matches = re.findall(r"['\"]([^'\"]+)['\"]", question)
+        if quoted_matches:
+            return quoted_matches[0]
+        
+        # Look for common field patterns
+        field_patterns = [
+            r"(\w+\s+amount)",
+            r"(\w+\s+field)",
+            r"(\w+\s+info)",
+            r"(\w+\s+type)",
+            r"(\w+\s+status)",
+            r"(\w+\s+date)",
+            r"(\w+\s+name)",
+            r"(\w+\s+number)"
+        ]
+        
+        for pattern in field_patterns:
+            matches = re.findall(pattern, question_lower)
+            if matches:
+                return matches[0].strip()
+        
+        # Default: try to find field name after "where does" or similar
+        if "where does" in question_lower:
+            parts = question_lower.split("where does")
+            if len(parts) > 1:
+                # Extract first meaningful word after "where does"
+                words = parts[1].strip().split()
+                if words:
+                    return words[0]
+        
+        return "field"
+    
+    def _extract_business_context(self, question: str) -> str:
+        """Extract business context from question."""
+        question_lower = question.lower()
+        
+        contexts = {
+            'universal life': ['universal', 'ul', 'life insurance'],
+            'account': ['account', 'acct'],
+            'contract': ['contract', 'policy'],
+            'customer': ['customer', 'client'],
+            'payment': ['payment', 'billing'],
+            'claim': ['claim', 'claims']
+        }
+        
+        for context, keywords in contexts.items():
+            if any(keyword in question_lower for keyword in keywords):
+                return context
+        
+        return ""
 
     async def run(
         self,
@@ -204,14 +337,18 @@ class ChatAgent:
             raise RuntimeError("Agent not fully configured (tools/provider missing)")
 
         t0 = time.time()
+        
+        # Check if this is an Oracle data source question
+        oracle_data = await self._check_oracle_data_sources(question)
+        
         primary = await self._semantic_topk(question, repository_scope, top_k, min_score)
         t1 = time.time()
         expanded, graph_summary = await self._expand_structure(primary, mode, repository_scope)
         t2 = time.time()
 
-        # Build prompt deterministically
+        # Build prompt deterministically with Oracle data if available
         max_in_tokens = getattr(self._settings, "llm_max_input_tokens", 8000) if self._settings else 8000
-        prompt = self._build_prompt(question, expanded, graph_summary, max_in_tokens)
+        prompt = self._build_prompt(question, expanded, graph_summary, max_in_tokens, oracle_data=oracle_data)
 
         # Generate with Bedrock
         max_out_tokens = getattr(self._settings, "llm_max_output_tokens", 1024) if self._settings else 1024

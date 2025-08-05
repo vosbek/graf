@@ -201,7 +201,7 @@ services:
       - MINIO_ACCESS_KEY=codebase-rag
       - MINIO_SECRET_KEY=codebase-rag-2024
       - LOG_LEVEL=INFO
-      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - EMBEDDING_MODEL=microsoft/codebert-base
     volumes:
       - ./data/repositories:/app/data/repositories
       - ./logs:/app/logs
@@ -244,7 +244,7 @@ services:
       - MINIO_ACCESS_KEY=codebase-rag
       - MINIO_SECRET_KEY=codebase-rag-2024
       - LOG_LEVEL=INFO
-      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - EMBEDDING_MODEL=microsoft/codebert-base
       - MAX_CONCURRENT_REPOS=10
       - BATCH_SIZE=100
     volumes:

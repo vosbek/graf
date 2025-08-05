@@ -28,6 +28,8 @@ class SupportedLanguage(Enum):
     PHP = "php"
     KOTLIN = "kotlin"
     SWIFT = "swift"
+    JSP = "jsp"
+    XML = "xml"
 
 
 @dataclass
@@ -49,6 +51,9 @@ class CodeChunk:
     docstring: Optional[str] = None
     annotations: Dict[str, Any] = None
     complexity_score: float = 0.0
+    business_rules: List[str] = None
+    framework_patterns: Dict[str, Any] = None
+    migration_notes: List[str] = None
     
     def __post_init__(self):
         if self.children_ids is None:
@@ -59,6 +64,12 @@ class CodeChunk:
             self.dependencies = []
         if self.annotations is None:
             self.annotations = {}
+        if self.business_rules is None:
+            self.business_rules = []
+        if self.framework_patterns is None:
+            self.framework_patterns = {}
+        if self.migration_notes is None:
+            self.migration_notes = []
 
 
 @dataclass
@@ -132,6 +143,10 @@ class TreeSitterParser:
             chunks, relationships = self._parse_java(code, tree, file_path)
         elif language == SupportedLanguage.CPP:
             chunks, relationships = self._parse_cpp(code, tree, file_path)
+        elif language == SupportedLanguage.JSP:
+            chunks, relationships = self._parse_jsp(code, tree, file_path)
+        elif language == SupportedLanguage.XML:
+            chunks, relationships = self._parse_xml(code, tree, file_path)
         else:
             # Generic parsing for other languages
             chunks, relationships = self._parse_generic(code, tree, file_path, language)
@@ -745,6 +760,11 @@ class TreeSitterParser:
             '.php': SupportedLanguage.PHP,
             '.kt': SupportedLanguage.KOTLIN,
             '.swift': SupportedLanguage.SWIFT,
+            '.jsp': SupportedLanguage.JSP,
+            '.tag': SupportedLanguage.JSP,
+            '.tagx': SupportedLanguage.JSP,
+            '.xml': SupportedLanguage.XML,
+            '.idl': SupportedLanguage.XML,  # CORBA IDL files
         }
         
         # Check file extension
@@ -770,3 +790,316 @@ class TreeSitterParser:
     def get_supported_languages(self) -> List[SupportedLanguage]:
         """Get list of supported languages."""
         return list(self.parsers.keys())
+    
+    def _parse_jsp(self, code: str, tree: Tree, file_path: str) -> Tuple[List[CodeChunk], List[RelationshipInfo]]:
+        """Parse JSP files for business logic and Struts patterns."""
+        chunks = []
+        relationships = []
+        code_lines = code.split('\n')
+        
+        # Extract JSP scriptlets (Java code embedded in JSP)
+        scriptlet_pattern = re.compile(r'<%\s*(.*?)\s*%>', re.DOTALL)
+        scriptlets = scriptlet_pattern.findall(code)
+        
+        for i, scriptlet in enumerate(scriptlets):
+            if scriptlet.strip():
+                chunk_id = f"{file_path}:scriptlet:{i}"
+                
+                # Analyze business logic in scriptlet
+                business_rules = self._extract_business_rules_from_java(scriptlet)
+                struts_patterns = self._extract_struts_patterns(scriptlet)
+                
+                chunk = CodeChunk(
+                    id=chunk_id,
+                    content=scriptlet,
+                    language=SupportedLanguage.JSP,
+                    chunk_type="scriptlet",
+                    name=f"scriptlet_{i}",
+                    start_line=self._find_line_number(code, scriptlet),
+                    end_line=self._find_line_number(code, scriptlet) + scriptlet.count('\n'),
+                    start_byte=0,
+                    end_byte=len(scriptlet),
+                    business_rules=business_rules,
+                    framework_patterns=struts_patterns,
+                    migration_notes=self._generate_jsp_migration_notes(scriptlet)
+                )
+                chunks.append(chunk)
+        
+        # Extract JSP directives and tags
+        directive_pattern = re.compile(r'<%@\s*(.*?)\s*%>', re.DOTALL)
+        directives = directive_pattern.findall(code)
+        
+        for i, directive in enumerate(directives):
+            chunk_id = f"{file_path}:directive:{i}"
+            chunk = CodeChunk(
+                id=chunk_id,
+                content=directive,
+                language=SupportedLanguage.JSP,
+                chunk_type="directive",
+                name=f"directive_{i}",
+                start_line=self._find_line_number(code, directive),
+                end_line=self._find_line_number(code, directive),
+                start_byte=0,
+                end_byte=len(directive)
+            )
+            chunks.append(chunk)
+        
+        # Extract Struts tags and forms
+        struts_tag_pattern = re.compile(r'<(html|bean|logic|nested):(\w+)([^>]*)>', re.IGNORECASE)
+        struts_tags = struts_tag_pattern.findall(code)
+        
+        for i, (namespace, tag, attributes) in enumerate(struts_tags):
+            chunk_id = f"{file_path}:struts_tag:{namespace}:{tag}:{i}"
+            
+            # Extract business significance
+            business_purpose = self._infer_business_purpose_from_struts_tag(namespace, tag, attributes)
+            
+            chunk = CodeChunk(
+                id=chunk_id,
+                content=f"<{namespace}:{tag}{attributes}>",
+                language=SupportedLanguage.JSP,
+                chunk_type="struts_tag",
+                name=f"{namespace}_{tag}",
+                start_line=self._find_line_number(code, f"<{namespace}:{tag}"),
+                end_line=self._find_line_number(code, f"<{namespace}:{tag}"),
+                start_byte=0,
+                end_byte=len(f"<{namespace}:{tag}{attributes}>"),
+                framework_patterns={"struts_namespace": namespace, "tag_type": tag, "business_purpose": business_purpose},
+                migration_notes=[f"Struts {namespace}:{tag} -> Angular component/directive"]
+            )
+            chunks.append(chunk)
+        
+        return chunks, relationships
+    
+    def _parse_xml(self, code: str, tree: Tree, file_path: str) -> Tuple[List[CodeChunk], List[RelationshipInfo]]:
+        """Parse XML files for configuration and CORBA IDL."""
+        chunks = []
+        relationships = []
+        
+        # Handle CORBA IDL files
+        if file_path.endswith('.idl'):
+            return self._parse_corba_idl(code, file_path)
+        
+        # Handle Struts configuration
+        if 'struts-config' in code or 'action-mappings' in code:
+            return self._parse_struts_config(code, file_path)
+        
+        # Generic XML parsing for configuration
+        return self._parse_generic_xml(code, file_path)
+    
+    def _parse_corba_idl(self, code: str, file_path: str) -> Tuple[List[CodeChunk], List[RelationshipInfo]]:
+        """Parse CORBA IDL files for service interfaces."""
+        chunks = []
+        relationships = []
+        
+        # Extract interface definitions
+        interface_pattern = re.compile(r'interface\s+(\w+)\s*(?::\s*([^{]+))?\s*{([^}]+)}', re.DOTALL)
+        interfaces = interface_pattern.findall(code)
+        
+        for interface_name, inheritance, interface_body in interfaces:
+            chunk_id = f"{file_path}:interface:{interface_name}"
+            
+            # Extract methods from interface
+            method_pattern = re.compile(r'(\w+)\s+(\w+)\s*\([^)]*\)', re.MULTILINE)
+            methods = method_pattern.findall(interface_body)
+            
+            business_operations = []
+            for return_type, method_name in methods:
+                business_operations.append(f"{return_type} {method_name}")
+            
+            chunk = CodeChunk(
+                id=chunk_id,
+                content=f"interface {interface_name} {{{interface_body}}}",
+                language=SupportedLanguage.XML,
+                chunk_type="corba_interface",
+                name=interface_name,
+                start_line=self._find_line_number(code, f"interface {interface_name}"),
+                end_line=self._find_line_number(code, f"interface {interface_name}") + interface_body.count('\n'),
+                start_byte=0,
+                end_byte=len(interface_body),
+                framework_patterns={
+                    "corba_interface": interface_name,
+                    "inheritance": inheritance.strip() if inheritance else None,
+                    "business_operations": business_operations
+                },
+                business_rules=[f"Service contract: {interface_name}"],
+                migration_notes=[f"CORBA interface {interface_name} -> GraphQL service/resolver"]
+            )
+            chunks.append(chunk)
+            
+            # Create relationships for inheritance
+            if inheritance:
+                for parent in inheritance.split(','):
+                    parent = parent.strip()
+                    relationships.append(RelationshipInfo(
+                        source_id=chunk_id,
+                        target_id=f"{file_path}:interface:{parent}",
+                        relationship_type="extends",
+                        source_location=(chunk.start_line, 0)
+                    ))
+        
+        return chunks, relationships
+    
+    def _parse_struts_config(self, code: str, file_path: str) -> Tuple[List[CodeChunk], List[RelationshipInfo]]:
+        """Parse Struts configuration XML for action mappings."""
+        chunks = []
+        relationships = []
+        
+        # Extract action mappings
+        action_pattern = re.compile(r'<action\s+([^>]+)>', re.IGNORECASE)
+        actions = action_pattern.findall(code)
+        
+        for i, action_attrs in enumerate(actions):
+            # Parse action attributes
+            path_match = re.search(r'path\s*=\s*["\']([^"\']+)["\']', action_attrs)
+            type_match = re.search(r'type\s*=\s*["\']([^"\']+)["\']', action_attrs)
+            
+            path = path_match.group(1) if path_match else f"action_{i}"
+            action_class = type_match.group(1) if type_match else None
+            
+            chunk_id = f"{file_path}:action:{path}"
+            
+            chunk = CodeChunk(
+                id=chunk_id,
+                content=f"<action {action_attrs}>",
+                language=SupportedLanguage.XML,
+                chunk_type="struts_action_mapping",
+                name=path,
+                start_line=self._find_line_number(code, action_attrs),
+                end_line=self._find_line_number(code, action_attrs),
+                start_byte=0,
+                end_byte=len(action_attrs),
+                framework_patterns={
+                    "struts_path": path,
+                    "action_class": action_class,
+                    "url_pattern": path
+                },
+                business_rules=[f"URL mapping: {path} -> business operation"],
+                migration_notes=[f"Struts action {path} -> GraphQL mutation/query + Angular route"]
+            )
+            chunks.append(chunk)
+            
+            # Create relationship to Java action class
+            if action_class:
+                relationships.append(RelationshipInfo(
+                    source_id=chunk_id,
+                    target_id=f"java_class:{action_class}",
+                    relationship_type="maps_to",
+                    source_location=(chunk.start_line, 0)
+                ))
+        
+        return chunks, relationships
+    
+    def _extract_business_rules_from_java(self, java_code: str) -> List[str]:
+        """Extract business rules from Java code snippets."""
+        business_rules = []
+        
+        # Look for validation patterns
+        validation_patterns = [
+            r'if\s*\(\s*([^)]+\.(?:isEmpty|isBlank|isNull))[^)]*\)',
+            r'if\s*\(\s*([^)]+\s*[<>=!]+\s*[^)]+)\)',
+            r'validate\w*\([^)]*\)',
+            r'assert\w*\([^)]*\)'
+        ]
+        
+        for pattern in validation_patterns:
+            matches = re.findall(pattern, java_code, re.IGNORECASE)
+            for match in matches:
+                business_rules.append(f"Validation: {match}")
+        
+        return business_rules
+    
+    def _extract_struts_patterns(self, code: str) -> Dict[str, Any]:
+        """Extract Struts-specific patterns from code."""
+        patterns = {}
+        
+        # Look for ActionForm usage
+        if 'ActionForm' in code:
+            patterns['uses_action_form'] = True
+        
+        # Look for forward declarations
+        forward_pattern = re.compile(r'mapping\.findForward\s*\(\s*["\']([^"\']+)["\']', re.IGNORECASE)
+        forwards = forward_pattern.findall(code)
+        if forwards:
+            patterns['forwards'] = forwards
+        
+        # Look for business method calls
+        business_method_pattern = re.compile(r'(\w+Service|\w+Manager|\w+DAO)\.(\w+)\s*\(', re.IGNORECASE)
+        business_calls = business_method_pattern.findall(code)
+        if business_calls:
+            patterns['business_service_calls'] = [f"{service}.{method}" for service, method in business_calls]
+        
+        return patterns
+    
+    def _generate_jsp_migration_notes(self, scriptlet: str) -> List[str]:
+        """Generate migration notes for JSP scriptlets."""
+        notes = []
+        
+        if 'session.getAttribute' in scriptlet:
+            notes.append("Session usage -> Angular state management (NgRx/services)")
+        
+        if 'request.getParameter' in scriptlet:
+            notes.append("Request parameters -> Angular reactive forms")
+        
+        if any(db_pattern in scriptlet for db_pattern in ['Connection', 'PreparedStatement', 'ResultSet']):
+            notes.append("Direct DB access -> GraphQL resolver with proper data layer")
+        
+        if 'out.println' in scriptlet:
+            notes.append("Dynamic content generation -> Angular templating")
+        
+        return notes
+    
+    def _infer_business_purpose_from_struts_tag(self, namespace: str, tag: str, attributes: str) -> str:
+        """Infer business purpose from Struts tag usage."""
+        business_purposes = {
+            'html:form': 'User input form',
+            'html:text': 'Text input field',
+            'html:select': 'Selection/dropdown',
+            'html:submit': 'Form submission',
+            'bean:write': 'Data display',
+            'logic:iterate': 'List/collection display',
+            'logic:present': 'Conditional display',
+            'logic:notPresent': 'Conditional display'
+        }
+        
+        tag_key = f"{namespace}:{tag}"
+        return business_purposes.get(tag_key, f"UI component: {tag}")
+    
+    def _parse_generic_xml(self, code: str, file_path: str) -> Tuple[List[CodeChunk], List[RelationshipInfo]]:
+        """Generic XML parsing for configuration files."""
+        chunks = []
+        relationships = []
+        
+        # Extract major XML elements that might represent configuration
+        element_pattern = re.compile(r'<(\w+)([^>]*)>([^<]*)</\1>', re.DOTALL)
+        elements = element_pattern.findall(code)
+        
+        for i, (tag_name, attributes, content) in enumerate(elements):
+            if content.strip():
+                chunk_id = f"{file_path}:config:{tag_name}:{i}"
+                
+                chunk = CodeChunk(
+                    id=chunk_id,
+                    content=f"<{tag_name}{attributes}>{content}</{tag_name}>",
+                    language=SupportedLanguage.XML,
+                    chunk_type="configuration",
+                    name=tag_name,
+                    start_line=self._find_line_number(code, f"<{tag_name}"),
+                    end_line=self._find_line_number(code, f"</{tag_name}>"),
+                    start_byte=0,
+                    end_byte=len(content),
+                    framework_patterns={"xml_element": tag_name, "config_type": "generic"}
+                )
+                chunks.append(chunk)
+        
+        return chunks, relationships
+    
+    def _find_line_number(self, full_text: str, search_text: str) -> int:
+        """Find line number of text in full document."""
+        try:
+            index = full_text.find(search_text)
+            if index == -1:
+                return 1
+            return full_text[:index].count('\n') + 1
+        except:
+            return 1

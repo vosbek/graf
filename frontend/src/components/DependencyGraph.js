@@ -36,7 +36,7 @@ function DependencyGraph({ repositories }) {
   const [graphStats, setGraphStats] = useState(null);
   const [fileDetails, setFileDetails] = useState(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
-  const { isReady, isLoading: healthLoading, error: healthError } = useSystemHealth();
+  const { isReady, isLoading: healthLoading, isInitialLoad, error: healthError } = useSystemHealth();
   
   const cyRef = useRef(null);
   const containerRef = useRef(null);
@@ -858,7 +858,7 @@ function DependencyGraph({ repositories }) {
       {(!isReady || healthLoading || healthError) && (
         <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 2 }}>
           {!isReady ? 'System is starting up. Graph features are disabled until ready.' :
-           healthLoading ? 'Checking system readiness...' :
+           isInitialLoad ? 'Checking system readiness...' :
            `Health error: ${healthError}`}
         </Alert>
       )}

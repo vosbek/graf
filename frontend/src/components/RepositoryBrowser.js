@@ -8,12 +8,12 @@ import { useSystemHealth } from '../context/SystemHealthContext';
 
 function RepositoryBrowser({ repositories = [] }) {
   const [selectedRepo, setSelectedRepo] = useState(null);
-  const { isReady, isLoading: healthLoading, error: healthError } = useSystemHealth();
+  const { isReady, isLoading: healthLoading, isInitialLoad, error: healthError } = useSystemHealth();
 
-  const readinessBanner = (!isReady || healthLoading || healthError) ? (
+  const readinessBanner = (!isReady || isInitialLoad || healthError) ? (
     <Alert severity={healthError ? 'error' : 'info'} sx={{ mb: 2 }}>
       {!isReady ? 'System is starting up. Repository Browser is disabled until the system is ready.' :
-       healthLoading ? 'Checking system readiness...' :
+       isInitialLoad ? 'Checking system readiness...' :
        `Health error: ${healthError}`}
     </Alert>
   ) : null;

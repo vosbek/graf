@@ -186,6 +186,13 @@ class ProcessingResult:
     dependency_count: int = 0
     maven_artifacts: List[str] = field(default_factory=list)
     
+    # Business logic metrics
+    business_rules_extracted: int = 0
+    struts_patterns_found: int = 0
+    corba_interfaces_found: int = 0
+    jsp_components_found: int = 0
+    migration_complexity_score: float = 0.0
+    
     # Processing metadata
     started_at: float = field(default_factory=time.time)
     completed_at: Optional[float] = None
@@ -1365,20 +1372,27 @@ class EnhancedRepositoryProcessor:
                 # Create chunker with config
                 chunker = CodeChunker(chunking_config)
                 
-                # Generate chunks
+                # Generate chunks with enhanced parsing
                 chunks = chunker.chunk_file(rel_path, content, language)
                 
-                # Store file data
+                # ENHANCED: Extract business rules and framework patterns
+                business_analysis = await self._extract_business_analysis(content, rel_path, language)
+                
+                # Store file data with business context
                 file_data = {
                     'path': rel_path,
                     'language': language.value,
                     'size': len(content),
                     'lines': len(content.split('\n')),
-                    'chunks_count': len(chunks)
+                    'chunks_count': len(chunks),
+                    'business_analysis': business_analysis
                 }
                 
                 batch_files.append(file_data)
                 batch_chunks.extend(chunks)
+                
+                # ENHANCED: Store business analysis in Neo4j
+                await self._store_business_analysis_to_neo4j(business_analysis, rel_path, repo_config.name)
                 
                 # Yield control periodically for async processing
                 if len(batch_files) % 5 == 0:
@@ -1767,3 +1781,237 @@ class EnhancedRepositoryProcessor:
 
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
+    
+    async def _extract_business_analysis(self, content: str, file_path: str, language) -> Dict[str, Any]:
+        """
+        Extract business rules and framework patterns from code content.
+        
+        Args:
+            content: File content
+            file_path: File path for context
+            language: Detected programming language
+            
+        Returns:
+            Dict containing business analysis results
+        """
+        analysis = {
+            'business_rules': [],
+            'framework_patterns': {},
+            'migration_complexity': 'low',
+            'struts_components': [],
+            'corba_interfaces': [],
+            'jsp_patterns': [],
+            'migration_notes': []
+        }
+        
+        try:
+            # Use enhanced Tree-sitter parser
+            chunks, relationships = self.tree_sitter_parser.parse_code(content, language, file_path)
+            
+            # Aggregate business information from chunks
+            total_business_rules = 0
+            total_framework_patterns = 0
+            
+            for chunk in chunks:
+                if hasattr(chunk, 'business_rules') and chunk.business_rules:
+                    analysis['business_rules'].extend(chunk.business_rules)
+                    total_business_rules += len(chunk.business_rules)
+                
+                if hasattr(chunk, 'framework_patterns') and chunk.framework_patterns:
+                    analysis['framework_patterns'].update(chunk.framework_patterns)
+                    total_framework_patterns += 1
+                    
+                    # Categorize framework-specific patterns
+                    if 'struts_namespace' in chunk.framework_patterns:
+                        analysis['struts_components'].append({
+                            'type': chunk.chunk_type,
+                            'name': chunk.name,
+                            'business_purpose': chunk.framework_patterns.get('business_purpose', ''),
+                            'location': f"{file_path}:{chunk.start_line}"
+                        })
+                    
+                    if 'corba_interface' in chunk.framework_patterns:
+                        analysis['corba_interfaces'].append({
+                            'interface': chunk.framework_patterns['corba_interface'],
+                            'operations': chunk.framework_patterns.get('business_operations', []),
+                            'location': f"{file_path}:{chunk.start_line}"
+                        })
+                
+                if hasattr(chunk, 'migration_notes') and chunk.migration_notes:
+                    analysis['migration_notes'].extend(chunk.migration_notes)
+            
+            # Calculate migration complexity based on patterns found
+            complexity_score = 0
+            
+            # JSP/Servlet complexity
+            if file_path.endswith(('.jsp', '.tag', '.tagx')):
+                analysis['jsp_patterns'] = self._analyze_jsp_complexity(content)
+                complexity_score += len(analysis['jsp_patterns']) * 2
+            
+            # Struts complexity
+            if any('struts' in pattern.lower() for pattern in analysis['framework_patterns'].keys()):
+                complexity_score += 5
+            
+            # CORBA complexity
+            if analysis['corba_interfaces']:
+                complexity_score += len(analysis['corba_interfaces']) * 3
+            
+            # Business rules complexity
+            complexity_score += total_business_rules
+            
+            # Determine migration complexity level
+            if complexity_score <= 3:
+                analysis['migration_complexity'] = 'low'
+            elif complexity_score <= 10:
+                analysis['migration_complexity'] = 'medium'
+            else:
+                analysis['migration_complexity'] = 'high'
+                
+            # Add relationships information
+            analysis['relationships'] = [
+                {
+                    'type': rel.relationship_type,
+                    'source': rel.source_id,
+                    'target': rel.target_id,
+                    'location': rel.source_location
+                }
+                for rel in relationships
+            ]
+            
+        except Exception as e:
+            self.logger.warning(f"Business analysis failed for {file_path}: {e}")
+            # Return basic analysis on error
+            
+        return analysis
+    
+    def _analyze_jsp_complexity(self, content: str) -> List[Dict[str, Any]]:
+        """Analyze JSP-specific complexity patterns."""
+        patterns = []
+        
+        # Check for embedded Java code (scriptlets)
+        import re
+        scriptlets = re.findall(r'<%[^@](.*?)%>', content, re.DOTALL)
+        if scriptlets:
+            patterns.append({
+                'type': 'scriptlets',
+                'count': len(scriptlets),
+                'complexity': 'high' if len(scriptlets) > 5 else 'medium',
+                'migration_note': 'Scriptlets need to be converted to Angular components'
+            })
+        
+        # Check for direct database access
+        if any(db_pattern in content for db_pattern in ['Connection', 'PreparedStatement', 'ResultSet']):
+            patterns.append({
+                'type': 'direct_db_access',
+                'complexity': 'high',
+                'migration_note': 'Direct DB access should be moved to GraphQL resolvers'
+            })
+        
+        # Check for session management
+        if 'session.' in content:
+            patterns.append({
+                'type': 'session_management',
+                'complexity': 'medium',
+                'migration_note': 'Session usage needs Angular state management'
+            })
+        
+        # Check for Struts tags
+        struts_tags = re.findall(r'<(html|bean|logic|nested):(\w+)', content)
+        if struts_tags:
+            patterns.append({
+                'type': 'struts_tags',
+                'count': len(struts_tags),
+                'complexity': 'medium',
+                'migration_note': 'Struts tags need Angular component equivalents'
+            })
+        
+        return patterns
+    
+    async def _store_business_analysis_to_neo4j(self, business_analysis: Dict[str, Any], file_path: str, repo_name: str):
+        """Store business analysis results in Neo4j graph database."""
+        try:
+            # Store business rules
+            for i, rule_text in enumerate(business_analysis.get('business_rules', [])):
+                rule_id = f"{repo_name}:{file_path}:rule:{i}"
+                await self.neo4j_client.create_business_rule(
+                    rule_id=rule_id,
+                    rule_text=rule_text,
+                    domain=self._infer_business_domain(rule_text),
+                    complexity=business_analysis.get('migration_complexity', 'medium'),
+                    rule_type='validation',
+                    file_path=file_path,
+                    location=f"{file_path}:rule_{i}"
+                )
+            
+            # Store Struts components
+            for struts_comp in business_analysis.get('struts_components', []):
+                await self.neo4j_client.create_struts_action(
+                    path=struts_comp.get('name', f"{file_path}:struts"),
+                    action_class=struts_comp.get('type', 'unknown'),
+                    business_purpose=struts_comp.get('business_purpose', ''),
+                    repo_name=repo_name,
+                    file_path=file_path,
+                    metadata={'location': struts_comp.get('location', '')}
+                )
+            
+            # Store CORBA interfaces
+            for corba_interface in business_analysis.get('corba_interfaces', []):
+                await self.neo4j_client.create_corba_interface(
+                    interface_name=corba_interface.get('interface', 'unknown'),
+                    operations=corba_interface.get('operations', []),
+                    repo_name=repo_name,
+                    file_path=file_path,
+                    metadata={'location': corba_interface.get('location', '')}
+                )
+            
+            # Store JSP components (if JSP patterns exist)
+            jsp_patterns = business_analysis.get('jsp_patterns', [])
+            if jsp_patterns:
+                component_id = f"{repo_name}:{file_path}:jsp"
+                await self.neo4j_client.create_jsp_component(
+                    component_id=component_id,
+                    component_type='jsp_page',
+                    business_purpose=self._infer_jsp_business_purpose(jsp_patterns),
+                    repo_name=repo_name,
+                    file_path=file_path,
+                    struts_patterns=[p.get('type', '') for p in jsp_patterns],
+                    migration_notes=business_analysis.get('migration_notes', [])
+                )
+            
+            # Create business relationships
+            for relationship in business_analysis.get('relationships', []):
+                # Skip relationship creation for now - would need proper ID mapping
+                pass
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to store business analysis for {file_path}: {e}")
+    
+    def _infer_business_domain(self, rule_text: str) -> str:
+        """Infer business domain from rule text."""
+        rule_lower = rule_text.lower()
+        
+        if any(word in rule_lower for word in ['user', 'login', 'auth', 'permission']):
+            return 'security'
+        elif any(word in rule_lower for word in ['amount', 'payment', 'contract', 'policy']):
+            return 'financial'
+        elif any(word in rule_lower for word in ['customer', 'client', 'account']):
+            return 'customer_management'
+        elif any(word in rule_lower for word in ['validate', 'required', 'empty']):
+            return 'validation'
+        else:
+            return 'general'
+    
+    def _infer_jsp_business_purpose(self, jsp_patterns: List[Dict[str, Any]]) -> str:
+        """Infer business purpose from JSP patterns."""
+        pattern_types = [p.get('type', '') for p in jsp_patterns]
+        
+        if 'struts_tags' in pattern_types:
+            return 'user_interface_form'
+        elif 'scriptlets' in pattern_types:
+            return 'dynamic_content_generation'
+        elif 'session_management' in pattern_types:
+            return 'user_session_handling'
+        elif 'direct_db_access' in pattern_types:
+            return 'data_access_layer'
+        else:
+            return 'web_presentation'

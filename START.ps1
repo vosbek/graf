@@ -505,6 +505,17 @@ sys.exit(asyncio.run(main()))
         }
     )
     
+    # Add Oracle validation if enabled
+    if ($env:ORACLE_ENABLED -eq "true") {
+        $services += @{
+            Name = "Oracle Integration"
+            HealthUrl = "http://localhost:8080/api/v1/oracle/health"
+            DatabasePort = 0
+            ExpectedContent = $null
+            Critical = $false  # Oracle is optional
+        }
+    }
+    
     # Add Redis to the services to validate
     $services += @{
         Name = "Redis"
@@ -650,6 +661,12 @@ sys.exit(asyncio.run(main()))
                     Write-Log "  Troubleshooting: Check if PostgreSQL container is running: podman ps | grep postgres" "INFO" "VALIDATION"
                     Write-Log "  Troubleshooting: Check PostgreSQL logs: podman logs postgres" "INFO" "VALIDATION"
                 }
+                "Oracle Integration" {
+                    Write-Log "  Troubleshooting: Check Oracle connection string in .env file" "INFO" "VALIDATION"
+                    Write-Log "  Troubleshooting: Verify Oracle credentials and network access" "INFO" "VALIDATION"
+                    Write-Log "  Troubleshooting: Check Oracle health: curl http://localhost:8080/api/v1/oracle/health" "INFO" "VALIDATION"
+                    Write-Log "  Troubleshooting: View Oracle config: curl http://localhost:8080/api/v1/oracle/config" "INFO" "VALIDATION"
+                }
             }
         }
     }
@@ -766,10 +783,20 @@ function Show-SystemStatus {
         @{
             Name = "Frontend"
             Port = 3000
-            HealthUrl = "http://localhost:3000"
+            HealthUrl = "http://localhost:3000" 
             ExpectedContent = $null
         }
     )
+    
+    # Add Oracle health check if enabled
+    if ($env:ORACLE_ENABLED -eq "true") {
+        $services += @{
+            Name = "Oracle Integration"
+            Port = 0  # Oracle doesn't have a fixed health port
+            HealthUrl = "http://localhost:8080/api/v1/oracle/health"
+            ExpectedContent = $null
+        }
+    }
     
     $healthyServices = 0
     $totalServices = $services.Count
@@ -836,6 +863,12 @@ function Show-SystemStatus {
     Write-Host "Redis:          localhost:6379" -ForegroundColor Cyan
     Write-Host "API Server:     http://localhost:8080/api/v1/health/" -ForegroundColor Cyan
     Write-Host "Frontend App:   http://localhost:3000" -ForegroundColor Cyan
+    
+    # Show Oracle URLs if enabled
+    if ($env:ORACLE_ENABLED -eq "true") {
+        Write-Host "Oracle API:     http://localhost:8080/api/v1/oracle/health" -ForegroundColor Cyan
+        Write-Host "Oracle Config:  http://localhost:8080/api/v1/oracle/config" -ForegroundColor Cyan
+    }
     
     Write-Log "=== Troubleshooting ===" "INFO" "STATUS"
     Write-Host "View logs:      Get-Content $LogFile -Wait" -ForegroundColor Yellow
@@ -1088,6 +1121,20 @@ function Start-ApiServer {
             # Set Redis URL environment variable
             $env:REDIS_URL = "redis://localhost:6379"
             Write-Log "Setting Redis URL: $env:REDIS_URL" "INFO" "API"
+            
+            # Oracle Database Integration (Optional)
+            # Set Oracle environment variables if configured
+            if ($env:ORACLE_ENABLED -eq "true") {
+                Write-Log "Oracle integration enabled - checking configuration" "INFO" "API"
+                if ($env:ORACLE_CONNECTION_STRING -and $env:ORACLE_USERNAME -and $env:ORACLE_PASSWORD) {
+                    Write-Log "Oracle configuration found - enabling Oracle integration" "INFO" "API"
+                    Write-Log "Oracle schemas: $(if ($env:ORACLE_SCHEMAS) { $env:ORACLE_SCHEMAS } else { 'USER' })" "INFO" "API"
+                } else {
+                    Write-Log "Oracle enabled but missing connection details - will run in disabled mode" "WARN" "API"
+                }
+            } else {
+                Write-Log "Oracle integration disabled" "DEBUG" "API"
+            }
             
             # If caller forces a host API port, honor it (used to avoid 8080 collisions)
             if (-not $env:GRAFRAG_HOST_API_PORT -and $Mode -eq 'api') {

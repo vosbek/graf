@@ -23,6 +23,8 @@ tree-sitter-languages==1.8.0
 # Database drivers
 psycopg2-binary==2.9.9
 redis==4.6.0
+# Oracle database driver (optional - only needed if Oracle integration is enabled)
+oracledb>=1.4.0
 
 # S3 and MinIO
 boto3==1.34.0

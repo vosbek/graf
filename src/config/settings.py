@@ -123,6 +123,15 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = Field(default=1024, description="Max output tokens for LLM", alias="LLM_MAX_OUTPUT_TOKENS")
     llm_request_timeout_seconds: float = Field(default=30.0, description="LLM request timeout (seconds)", alias="LLM_REQUEST_TIMEOUT_SECONDS")
     
+    # --- Oracle Database Configuration (Optional - for legacy system analysis) ---
+    oracle_enabled: bool = Field(default=False, description="Enable Oracle database integration", alias="ORACLE_ENABLED")
+    oracle_connection_string: Optional[str] = Field(default=None, description="Oracle connection string (host:port/service)", alias="ORACLE_CONNECTION_STRING")
+    oracle_username: Optional[str] = Field(default=None, description="Oracle database username", alias="ORACLE_USERNAME")
+    oracle_password: Optional[str] = Field(default=None, description="Oracle database password", alias="ORACLE_PASSWORD") 
+    oracle_schemas: str = Field(default="USER", description="Comma-separated list of schemas to analyze", alias="ORACLE_SCHEMAS")
+    oracle_max_connections: int = Field(default=5, description="Maximum Oracle connections in pool", alias="ORACLE_MAX_CONNECTIONS")
+    oracle_schema_cache_ttl: int = Field(default=3600, description="Schema cache TTL in seconds", alias="ORACLE_SCHEMA_CACHE_TTL")
+    
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
