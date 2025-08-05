@@ -24,6 +24,14 @@ import SystemHealthOverview from './components/SystemHealthOverview';
 import { ApiService } from './services/ApiService';
 import { useSystemHealth } from './context/SystemHealthContext';
 
+const DEBUG = String(process.env.REACT_APP_API_DEBUG || '').toLowerCase() === 'true';
+const dlog = (...args) => {
+  if (DEBUG && typeof window !== 'undefined') {
+    // eslint-disable-next-line no-console
+    console.log('[App]', ...args);
+  }
+};
+
 const drawerWidth = 240;
 
 // Navigation items
@@ -61,13 +69,20 @@ function AppContent() {
       if (!isReady) return;
       setLoadingRepos(true);
       setRepoError('');
+      const t0 = Date.now();
+      dlog('repositories:load:start', { route: location.pathname });
       try {
         const reposData = await ApiService.getRepositories();
         if (!ignore) {
           setRepositories(reposData.repositories || []);
+          dlog('repositories:load:success', { ms: Date.now() - t0, count: (reposData.repositories || []).length });
         }
       } catch (e) {
-        if (!ignore) setRepoError(e.message || 'Failed to load repositories');
+        if (!ignore) {
+          const msg = e?.message || 'Failed to load repositories';
+          setRepoError(msg);
+          dlog('repositories:load:error', { ms: Date.now() - t0, message: msg });
+        }
       } finally {
         if (!ignore) setLoadingRepos(false);
       }

@@ -1,45 +1,62 @@
 import axios from 'axios';
 
- // Configure axios defaults
- const API_BASE_URL = process.env.REACT_APP_API_URL || '';
- // Emit targeted diagnostics to validate frontend->backend connectivity assumptions
- if (typeof window !== 'undefined') {
-   const debugFlag = String(process.env.REACT_APP_API_DEBUG || '').toLowerCase() === 'true';
-   if (debugFlag) {
-     // eslint-disable-next-line no-console
-     console.log('[ApiService] init', {
-       API_BASE_URL: API_BASE_URL || '(empty -> using relative URLs with dev proxy)',
-       location: window.location.href,
-       proxyHint: 'Dev server proxy configured in package.json -> http://localhost:8080'
-     });
-   }
- }
- const api = axios.create({
-   baseURL: API_BASE_URL,
-   timeout: 60000, // 60 seconds for long operations
-   headers: {
-     'Content-Type': 'application/json',
-   },
- });
+// Configure axios defaults
+const API_BASE_URL = process.env.REACT_APP_API_URL || '';
+
+// Emit targeted diagnostics to validate frontend->backend connectivity assumptions
+if (typeof window !== 'undefined') {
+  const debugFlag = String(process.env.REACT_APP_API_DEBUG || '').toLowerCase() === 'true';
+  if (debugFlag) {
+    // eslint-disable-next-line no-console
+    console.log('[ApiService] init', {
+      API_BASE_URL: API_BASE_URL || '(empty -> using relative URLs with dev proxy)',
+      location: window.location.href,
+      proxyHint: 'Dev server proxy configured in package.json -> http://localhost:8080',
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+
+// Create primary axios instance
+const api = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 60000, // 60 seconds for long operations
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+// Lightweight instance for health with short timeout (only used when explicitly called)
+const apiHealth = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 5000, // 5s to avoid long spinner perception
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+// Debug helper
+const DEBUG = String(process.env.REACT_APP_API_DEBUG || '').toLowerCase() === 'true';
+const debugLog = (...args) => {
+  if (DEBUG && typeof window !== 'undefined') {
+    // eslint-disable-next-line no-console
+    console.log(...args);
+  }
+};
 
 // Request interceptor for debugging (toggle via REACT_APP_API_DEBUG=true)
-const DEBUG = String(process.env.REACT_APP_API_DEBUG || '').toLowerCase() === 'true';
 api.interceptors.request.use(
   (config) => {
-    if (DEBUG) {
-      // eslint-disable-next-line no-console
-      console.log(`API Request: ${config.method?.toUpperCase()} ${config.baseURL || ''}${config.url}`, {
-        params: config.params,
-        data: config.data,
-      });
-    }
+    debugLog(
+      `[ApiService] -> ${config.method?.toUpperCase()} ${config.baseURL || ''}${config.url}`,
+      { params: config.params, data: config.data, ts: Date.now() }
+    );
+    // stamp start time for duration metrics
+    config.metadata = { start: performance && performance.now ? performance.now() : Date.now() };
     return config;
   },
   (error) => {
-    if (DEBUG) {
-      // eslint-disable-next-line no-console
-      console.error('API Request Error:', error);
-    }
+    debugLog('[ApiService] request error', error);
     return Promise.reject(error);
   }
 );
@@ -47,13 +64,17 @@ api.interceptors.request.use(
 // Response interceptor for error handling
 api.interceptors.response.use(
   (response) => {
+    const start = response.config?.metadata?.start || (performance && performance.now ? performance.now() : Date.now());
+    const end = performance && performance.now ? performance.now() : Date.now();
+    const dur = Math.max(0, end - start);
+    debugLog(
+      `[ApiService] <- ${response.status} ${response.config?.method?.toUpperCase()} ${response.config?.baseURL || ''}${response.config?.url} (${Math.round(dur)}ms)`
+    );
     return response;
   },
   (error) => {
-    if (DEBUG) {
-      console.error('API Response Error:', error);
-    }
-    
+    debugLog('[ApiService] response error', error);
+
     // Helper function to parse API errors properly
     const parseApiError = (err) => {
       const res = err.response;
@@ -82,22 +103,12 @@ api.interceptors.response.use(
         return err.message || 'Unknown error';
       }
     };
-    
+
     // Handle different error types
     if (error.response) {
       // Server responded with error status
       const status = error.response.status;
       const message = parseApiError(error);
-      // Normalize common statuses with concise messages
-      if (status === 422) {
-        throw new Error(`Validation Error (422): ${message}`);
-      }
-      if (status === 404) {
-        throw new Error(`Not Found (404): ${message}`);
-      }
-      if (status === 400) {
-        throw new Error(`Bad Request (400): ${message}`);
-      }
       throw new Error(`Server Error (${status}): ${message}`);
     } else if (error.request) {
       // Network error
@@ -112,18 +123,13 @@ api.interceptors.response.use(
 export class ApiService {
   // Health and Status (canonical)
   static async getSystemStatus() {
+    const t0 = Date.now();
     try {
-      const response = await api.get('/api/v1/health/ready');
-      if (String(process.env.REACT_APP_API_DEBUG || '').toLowerCase() === 'true') {
-        // eslint-disable-next-line no-console
-        console.log('[ApiService] readiness payload', response?.data);
-      }
+      const response = await apiHealth.get('/api/v1/health/ready');
+      debugLog('[ApiService.getSystemStatus] OK', { ms: Date.now() - t0, url: (API_BASE_URL || '(relative)') + '/api/v1/health/ready' });
       return response.data;
     } catch (error) {
-      if (String(process.env.REACT_APP_API_DEBUG || '').toLowerCase() === 'true') {
-        // eslint-disable-next-line no-console
-        console.error('[ApiService] readiness fetch failed', error?.message || error);
-      }
+      debugLog('[ApiService.getSystemStatus] FAIL', { ms: Date.now() - t0, message: error?.message, url: (API_BASE_URL || '(relative)') + '/api/v1/health/ready' });
       return { status: 'error', error: error.message };
     }
   }

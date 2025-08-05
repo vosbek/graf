@@ -49,6 +49,7 @@ param(
 $ErrorActionPreference = "Stop"
 $StartTime = Get-Date
 $LogFile = "logs\start-$(Get-Date -Format 'yyyy-MM-dd-HH-mm-ss').log"
+$PidTrackingFile = "logs\running-pids.json"
 
 # Version marker (increment on each run)
 $VersionFile = "VERSION"
@@ -824,6 +825,41 @@ function Show-SystemStatus {
 # Ensure fresh startup helpers exist before use in 'full' mode
 function Write-LogWrapper { param([string]$msg,[string]$lvl='INFO'); Write-Log $msg $lvl }
 
+# Function to kill processes from the PID tracking file
+function Stop-TrackedProcesses {
+    if (-not (Test-Path $PidTrackingFile)) {
+        Write-Log "No PID tracking file found" "INFO"
+        return
+    }
+    
+    try {
+        $pidData = Get-Content $PidTrackingFile -Raw | ConvertFrom-Json -AsHashtable
+        $killedCount = 0
+        
+        foreach ($key in $pidData.Keys) {
+            $processPid = $pidData[$key]
+            try {
+                $process = Get-Process -Id $processPid -ErrorAction SilentlyContinue
+                if ($process) {
+                    Write-Log "Stopping tracked process: $key (PID: $processPid)" "INFO"
+                    Stop-Process -Id $processPid -Force -ErrorAction SilentlyContinue
+                    $killedCount++
+                } else {
+                    Write-Log "Tracked process $key (PID: $processPid) is no longer running" "INFO"
+                }
+            } catch {
+                Write-Log "Failed to stop tracked process $key (PID: $processPid): $($_.Exception.Message)" "WARN"
+            }
+        }
+        
+        # Clear the tracking file after stopping processes
+        @{} | ConvertTo-Json | Set-Content $PidTrackingFile
+        Write-Log "Stopped $killedCount tracked processes" "INFO"
+    } catch {
+        Write-Log "Failed to process PID tracking file: $($_.Exception.Message)" "ERROR"
+    }
+}
+
 function Stop-ProcessIfRunning {
     param([string]$Name)
     try {
@@ -1071,7 +1107,24 @@ function Start-ApiServer {
 
             $cmd = "python -m uvicorn src.main:app --host 0.0.0.0 --port $hostPort --reload --log-level $($LogLevel.ToLower())"
             Write-Log ("Launching Command: {0}" -f $cmd) "INFO" "API"
-            Start-Process -FilePath "python" -ArgumentList "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "$hostPort", "--reload", "--log-level", $LogLevel.ToLower() -WorkingDirectory (Get-Location) -WindowStyle Hidden
+            $apiProcess = Start-Process -FilePath "python" -ArgumentList "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "$hostPort", "--reload", "--log-level", $LogLevel.ToLower() -WorkingDirectory (Get-Location) -WindowStyle Hidden -PassThru
+            
+            # Track the API process PID
+            if ($apiProcess -and $apiProcess.Id) {
+                Write-Log "API server started with PID: $($apiProcess.Id)" "INFO" "API"
+                # Save PID to tracking file
+                try {
+                    $pidData = @{}
+                    if (Test-Path $PidTrackingFile) {
+                        $pidData = Get-Content $PidTrackingFile -Raw | ConvertFrom-Json -AsHashtable
+                    }
+                    $pidData["api_server"] = $apiProcess.Id
+                    $pidData | ConvertTo-Json | Set-Content $PidTrackingFile
+                    Write-Log "API server PID saved to tracking file" "INFO" "API"
+                } catch {
+                    Write-Log "Failed to save API server PID to tracking file: $($_.Exception.Message)" "WARN" "API"
+                }
+            }
         }
         elseif (Test-Path "mvp\main.py") {
             Write-Log "Starting MVP API server..." "INFO" "API"
@@ -1190,8 +1243,28 @@ function Start-Frontend {
     try {
         # Force PowerShell to invoke npm.cmd to avoid opening npm.ps1 in an editor
         $env:PORT = 3000
-        & "$env:ProgramFiles\nodejs\npm.cmd" start
-        $npmExit = $LASTEXITCODE
+        
+        # Start npm in a new process and capture its PID
+        $frontendProcess = Start-Process -FilePath "$env:ProgramFiles\nodejs\npm.cmd" -ArgumentList "start" -PassThru
+        $frontendPid = $frontendProcess.Id
+        
+        # Save frontend PID to tracking file
+        try {
+            $pidData = @{}
+            if (Test-Path $PidTrackingFile) {
+                $pidData = Get-Content $PidTrackingFile -Raw | ConvertFrom-Json -AsHashtable
+            }
+            $pidData["frontend"] = $frontendPid
+            $pidData | ConvertTo-Json | Set-Content $PidTrackingFile
+            Write-Log "Frontend server started with PID: $frontendPid" "INFO"
+            Write-Log "Frontend PID saved to tracking file" "INFO"
+        } catch {
+            Write-Log "Failed to save frontend PID to tracking file: $($_.Exception.Message)" "WARN"
+        }
+        
+        # Wait for the process to exit
+        $frontendProcess.WaitForExit()
+        $npmExit = $frontendProcess.ExitCode
     } catch {
         Pop-Location
         Write-Log ("Failed to start React dev server: {0}" -f $_.Exception.Message) "ERROR"
@@ -1461,6 +1534,11 @@ function Main {
             
             # Enforce clean restart of everything (scoped stops only; do not kill unrelated tools)
             Write-Log "Stopping existing services for clean restart..." "INFO" "MAIN"
+            
+            # First stop any processes from the PID tracking file
+            Stop-TrackedProcesses
+            
+            # Then use the regular stop functions
             Stop-FrontendIfRunning
             Stop-ApiIfRunning
             Stop-ComposeStack -ComposeFiles @("podman-compose.dev.yml")
