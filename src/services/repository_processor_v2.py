@@ -31,6 +31,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Any, Union, Tuple
 import uuid
+import fnmatch
 
 # Core processing imports
 from ..processing.code_chunker import CodeChunker, EnhancedChunk, ChunkingConfig
@@ -59,6 +60,50 @@ class ProcessingStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     RETRYING = "retrying"
+
+
+def _matches_exclusion_pattern(file_path: Path, pattern: str, repo_root: Path) -> bool:
+    """
+    Check if a file path matches an exclusion pattern.
+    
+    This function properly handles glob patterns like **/node_modules/** on Windows
+    by converting paths to POSIX format and using fnmatch.
+    
+    Args:
+        file_path: The file path to check
+        pattern: The exclusion pattern (e.g., "**/node_modules/**")
+        repo_root: The repository root path for relative path calculation
+        
+    Returns:
+        True if the file matches the exclusion pattern
+    """
+    try:
+        # Get relative path from repo root
+        relative_path = file_path.relative_to(repo_root)
+        
+        # Convert to POSIX format for consistent pattern matching
+        posix_path = relative_path.as_posix()
+        
+        # Handle different pattern formats
+        if pattern.startswith('**/') and pattern.endswith('/**'):
+            # Pattern like **/node_modules/** - check if any part of path matches
+            pattern_core = pattern[3:-3]  # Remove **/ and /**
+            path_parts = posix_path.split('/')
+            return pattern_core in path_parts
+        elif pattern.startswith('**/'):
+            # Pattern like **/*.class - use fnmatch
+            return fnmatch.fnmatch(posix_path, pattern)
+        elif pattern.endswith('/**'):
+            # Pattern like build/** - check if path starts with pattern prefix
+            pattern_prefix = pattern[:-3]  # Remove /**
+            return posix_path.startswith(pattern_prefix + '/') or posix_path == pattern_prefix
+        else:
+            # Regular pattern - use fnmatch
+            return fnmatch.fnmatch(posix_path, pattern)
+            
+    except (ValueError, OSError):
+        # If we can't get relative path, fall back to string matching
+        return fnmatch.fnmatch(str(file_path), pattern)
 
 
 class RepositoryPriority(str, Enum):
@@ -95,7 +140,10 @@ class RepositoryConfig:
     exclude_patterns: List[str] = field(default_factory=lambda: [
         "**/target/**", "**/build/**", "**/dist/**", "**/node_modules/**",
         "**/.git/**", "**/*.class", "**/*.jar", "**/*.war", "**/*.ear",
-        "**/bin/**", "**/obj/**", "**/*.exe", "**/*.dll", "**/*.so"
+        "**/bin/**", "**/obj/**", "**/*.exe", "**/*.dll", "**/*.so",
+        "**/.vscode/**", "**/.idea/**", "**/__pycache__/**", "**/.pytest_cache/**",
+        "**/coverage/**", "**/htmlcov/**", "**/.coverage", "**/logs/**",
+        "**/tmp/**", "**/temp/**", "**/.DS_Store", "**/Thumbs.db"
     ])
     
     # Processing limits
@@ -149,7 +197,10 @@ class LocalRepositoryConfig:
     exclude_patterns: List[str] = field(default_factory=lambda: [
         "**/target/**", "**/build/**", "**/dist/**", "**/node_modules/**",
         "**/.git/**", "**/*.class", "**/*.jar", "**/*.war", "**/*.ear",
-        "**/bin/**", "**/obj/**", "**/*.exe", "**/*.dll", "**/*.so"
+        "**/bin/**", "**/obj/**", "**/*.exe", "**/*.dll", "**/*.so",
+        "**/.vscode/**", "**/.idea/**", "**/__pycache__/**", "**/.pytest_cache/**",
+        "**/coverage/**", "**/htmlcov/**", "**/.coverage", "**/logs/**",
+        "**/tmp/**", "**/temp/**", "**/.DS_Store", "**/Thumbs.db"
     ])
     
     # Processing limits
@@ -1083,7 +1134,7 @@ class EnhancedRepositoryProcessor:
                 # Check exclusion patterns
                 excluded = False
                 for pattern in repo_config.exclude_patterns:
-                    if file_path.match(pattern):
+                    if _matches_exclusion_pattern(file_path, pattern, repo_path):
                         excluded = True
                         break
                 
@@ -1246,7 +1297,7 @@ class EnhancedRepositoryProcessor:
                 # Check exclusion patterns
                 excluded = False
                 for pattern in repo_config.exclude_patterns:
-                    if file_path.match(pattern):
+                    if _matches_exclusion_pattern(file_path, pattern, repo_path):
                         excluded = True
                         break
                 
