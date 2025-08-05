@@ -115,9 +115,11 @@ function SystemDiagnostics({ open, onClose }) {
               System Health Score
             </Typography>
             <Tooltip title="Refresh">
-              <IconButton onClick={handleRefresh} disabled={loading}>
-                <Refresh />
-              </IconButton>
+              <span>
+                <IconButton onClick={handleRefresh} disabled={loading}>
+                  <Refresh />
+                </IconButton>
+              </span>
             </Tooltip>
           </Box>
           

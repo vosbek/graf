@@ -3,6 +3,24 @@
 Purpose
 Enable engineers and architects to converse with large, multi-repo codebases using a rock-solid, no-fallback pipeline: in-process Strands Agent orchestrating deterministic, code-aware retrieval across Chroma (semantic code vectors) and Neo4j (structural/relationship graph), with synthesis via AWS Bedrock Sonnet 3.7. Security (auth, strict CORS), observability, and fail-fast configuration are mandatory.
 
+## Redis for Task Status and Persistence
+- **Role:** Redis is used as a high-performance, in-memory data store for persistent task status tracking of repository indexing jobs.
+- **Persistence:** It ensures that indexing task statuses, progress, and errors are not lost if the API service restarts, providing resilience and continuity.
+- **Real-time Updates:** Redis's pub/sub capabilities (though not directly exposed in this architecture diagram, implied by `StatusUpdateManager`) facilitate real-time updates to connected WebSocket clients for live progress monitoring.
+- **Data Model:** Stores `EnhancedIndexingStatus` objects, including stage history, embedding progress, and error details.
+
+## Redis for Task Status and Persistence
+- **Role:** Redis is used as a high-performance, in-memory data store for persistent task status tracking of repository indexing jobs.
+- **Persistence:** It ensures that indexing task statuses, progress, and errors are not lost if the API service restarts, providing resilience and continuity.
+- **Real-time Updates:** Redis's pub/sub capabilities (though not directly exposed in this architecture diagram, implied by `StatusUpdateManager`) facilitate real-time updates to connected WebSocket clients for live progress monitoring.
+- **Data Model:** Stores `EnhancedIndexingStatus` objects, including stage history, embedding progress, and error details.
+
+## Redis for Task Status and Persistence
+- **Role:** Redis is used as a high-performance, in-memory data store for persistent task status tracking of repository indexing jobs.
+- **Persistence:** It ensures that indexing task statuses, progress, and errors are not lost if the API service restarts, providing resilience and continuity.
+- **Real-time Updates:** Redis's pub/sub capabilities (though not directly exposed in this architecture diagram, implied by `StatusUpdateManager`) facilitate real-time updates to connected WebSocket clients for live progress monitoring.
+- **Data Model:** Stores `EnhancedIndexingStatus` objects, including stage history, embedding progress, and error details.
+
 Target Architecture (Textual Diagram)
 UI (React ChatInterface)
   → FastAPI Chat Router (/api/v1/chat/ask, feature-flagged by Bedrock config)
@@ -13,6 +31,17 @@ UI (React ChatInterface)
       → Prompt Builder (size-capped, deterministic)
       → Bedrock LLM Provider (Sonnet 3.7)
   ← Answer + Citations (chunk_id, file_path, repository) + Diagnostics
+
+Indexing Pipeline (Asynchronous, Redis-backed)
+  → FastAPI Indexing Router (/api/v1/index/*)
+    → Background Task (RepositoryProcessor)
+      → Redis (Persistent Task Status, Logs, Metrics)
+      → Git Client (Cloning)
+      → File Parsers (Java, XML, etc.)
+      → Embedding Model (CodeBERT)
+      → ChromaDB (Vector Store)
+      → Neo4j (Knowledge Graph)
+  ← Initial Task ID (for status tracking)
 
 Key Principles
 - No fallbacks. If Bedrock credentials, model, or region are invalid, chat is not registered; rest of the API remains unaffected.

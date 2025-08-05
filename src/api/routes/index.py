@@ -239,6 +239,7 @@ class EnhancedIndexingStatus(BaseModel):
 
 class IndexingStatusResponse(BaseModel):
     """Response model for indexing status."""
+    task_id: str = Field(..., description="Unique ID for the indexing task")
     repository_name: str
     status: ProcessingStatus
     progress: float = Field(ge=0.0, le=1.0, description="Progress percentage")
@@ -261,85 +262,82 @@ class IndexingStatusResponse(BaseModel):
         }
 
 
-# Enhanced global task tracking
-processing_tasks: Dict[str, asyncio.Task] = {}
-task_status: Dict[str, EnhancedIndexingStatus] = {}
+from ...core.redis_client import RedisClient, get_redis_client
+from typing import Optional
+
 
 # WebSocket connection management
 active_websockets: Dict[str, List[WebSocket]] = {}
 
 class StatusUpdateManager:
-    """Manages real-time status updates and WebSocket connections."""
+    """Manages real-time status updates and WebSocket connections using Redis."""
     
-    @staticmethod
-    async def update_task_status(task_id: str, updates: Dict[str, Any]) -> None:
-        """Update task status and notify WebSocket clients."""
-        if task_id in task_status:
+    def __init__(self, redis_client: RedisClient):
+        self.redis = redis_client
+
+    async def update_task_status(self, task_id: str, updates: Dict[str, Any]) -> None:
+        """Update task status in Redis and notify WebSocket clients."""
+        current_status = await self.redis.get_task_status(task_id)
+        if current_status:
             # Update the status object
-            current_status = task_status[task_id]
-            for key, value in updates.items():
-                if hasattr(current_status, key):
-                    setattr(current_status, key, value)
+            current_status.update(updates)
+            await self.redis.set_task_status(task_id, current_status)
             
             # Notify WebSocket clients
-            await StatusUpdateManager.broadcast_status_update(task_id, current_status)
+            await self.broadcast_status_update(task_id, current_status)
     
-    @staticmethod
-    async def add_stage_progress(task_id: str, stage: ProcessingStage, **kwargs) -> None:
+    async def add_stage_progress(self, task_id: str, stage: ProcessingStage, **kwargs) -> None:
         """Add a new stage to the progress history."""
-        if task_id in task_status:
-            current_status = task_status[task_id]
+        current_status = await self.redis.get_task_status(task_id)
+        if current_status:
             stage_progress = StageProgress(
                 stage=stage,
                 started_at=datetime.now(),
                 **kwargs
-            )
-            current_status.stage_history.append(stage_progress)
-            current_status.current_stage = stage
-            current_status.current_stage_progress = stage_progress
+            ).dict()
+            current_status['stage_history'].append(stage_progress)
+            current_status['current_stage'] = stage
+            current_status['current_stage_progress'] = stage_progress
             
-            await StatusUpdateManager.broadcast_status_update(task_id, current_status)
+            await self.redis.set_task_status(task_id, current_status)
+            await self.broadcast_status_update(task_id, current_status)
     
-    @staticmethod
-    async def complete_stage(task_id: str, **kwargs) -> None:
+    async def complete_stage(self, task_id: str, **kwargs) -> None:
         """Mark the current stage as completed."""
-        if task_id in task_status:
-            current_status = task_status[task_id]
-            if current_status.current_stage_progress:
-                current_status.current_stage_progress.completed_at = datetime.now()
-                current_status.current_stage_progress.progress_percentage = 100.0
-                for key, value in kwargs.items():
-                    if hasattr(current_status.current_stage_progress, key):
-                        setattr(current_status.current_stage_progress, key, value)
-                
-                await StatusUpdateManager.broadcast_status_update(task_id, current_status)
+        current_status = await self.redis.get_task_status(task_id)
+        if current_status and current_status.get('current_stage_progress'):
+            current_status['current_stage_progress']['completed_at'] = datetime.now().isoformat()
+            current_status['current_stage_progress']['progress_percentage'] = 100.0
+            current_status['current_stage_progress'].update(kwargs)
+            
+            await self.redis.set_task_status(task_id, current_status)
+            await self.broadcast_status_update(task_id, current_status)
     
-    @staticmethod
-    async def add_error(task_id: str, error_type: str, error_message: str, 
+    async def add_error(self, task_id: str, error_type: str, error_message: str, 
                        file_path: Optional[str] = None, recoverable: bool = True) -> None:
         """Add an error to the task status."""
-        if task_id in task_status:
-            current_status = task_status[task_id]
+        current_status = await self.redis.get_task_status(task_id)
+        if current_status:
             error = IndexingError(
                 error_type=error_type,
                 error_message=error_message,
                 file_path=file_path,
-                stage=current_status.current_stage,
+                stage=current_status['current_stage'],
                 timestamp=datetime.now(),
                 recoverable=recoverable
-            )
-            current_status.errors.append(error)
+            ).dict()
+            current_status['errors'].append(error)
             
-            await StatusUpdateManager.broadcast_status_update(task_id, current_status)
+            await self.redis.set_task_status(task_id, current_status)
+            await self.broadcast_status_update(task_id, current_status)
     
-    @staticmethod
-    async def broadcast_status_update(task_id: str, status: EnhancedIndexingStatus) -> None:
+    async def broadcast_status_update(self, task_id: str, status: Dict[str, Any]) -> None:
         """Broadcast status update to all connected WebSocket clients."""
         if task_id in active_websockets:
             message = {
                 "type": "status_update",
                 "task_id": task_id,
-                "data": status.dict()
+                "data": status
             }
             
             # Remove disconnected clients
@@ -363,6 +361,7 @@ async def index_repository(
     request: RepositoryIndexRequest,
     background_tasks: BackgroundTasks,
     processor: EnhancedRepositoryProcessor = Depends(get_repository_processor),
+    redis_client: RedisClient = Depends(get_redis_client),
     dry_run: bool = QueryParam(default=False, description="Analyze and estimate without writing to Neo4j/Chroma")
 ):
     """
@@ -395,20 +394,23 @@ async def index_repository(
             task_id = f"{request.name}_{int(time.time())}"
             run_id = __import__("uuid").uuid4().hex
 
+            status_manager = StatusUpdateManager(redis_client)
+
             async def process_repository():
                 try:
-                    # Initialize enhanced status tracking
-                    task_status[task_id] = EnhancedIndexingStatus(
+                    # Initialize enhanced status tracking in Redis
+                    initial_status = EnhancedIndexingStatus(
                         repository_name=request.name,
                         task_id=task_id,
                         run_id=run_id,
                         status=ProcessingStatus.IN_PROGRESS,
                         current_stage=ProcessingStage.QUEUED,
                         started_at=datetime.now()
-                    )
+                    ).dict()
+                    await redis_client.set_task_status(task_id, initial_status)
 
                     # Stage 1: Cloning/Preparation
-                    await StatusUpdateManager.add_stage_progress(
+                    await status_manager.add_stage_progress(
                         task_id, ProcessingStage.CLONING,
                         current_operation="Preparing repository for processing"
                     )
@@ -423,15 +425,19 @@ async def index_repository(
                             repo_config,
                             run_id=run_id,
                             progress_callback=lambda stage, progress, details=None:
-                                asyncio.create_task(_update_progress(stage, progress, details))
+                                asyncio.create_task(status_manager.update_task_status(task_id, {
+                                    'current_stage': stage,
+                                    'overall_progress': progress,
+                                    **(details or {})
+                                }))
                         )
 
-                    await StatusUpdateManager.complete_stage(task_id)
+                    await status_manager.complete_stage(task_id)
                     
                     # Update final status
-                    await StatusUpdateManager.update_task_status(task_id, {
-                        "status": result.status,
-                        "current_stage": ProcessingStage.COMPLETED if result.status == ProcessingStatus.COMPLETED else ProcessingStage.FAILED,
+                    await status_manager.update_task_status(task_id, {
+                        "status": result.status.value,
+                        "current_stage": (ProcessingStage.COMPLETED if result.status == ProcessingStatus.COMPLETED else ProcessingStatus.FAILED).value,
                         "overall_progress": 100.0,
                         "processed_files": result.processed_files,
                         "generated_chunks": result.generated_chunks,
@@ -442,65 +448,32 @@ async def index_repository(
                     })
 
                     if result.error_message:
-                        await StatusUpdateManager.add_error(
+                        await status_manager.add_error(
                             task_id, "processing_error", result.error_message, recoverable=False
                         )
 
                 except Exception as e:
-                    await StatusUpdateManager.update_task_status(task_id, {
-                        "status": ProcessingStatus.FAILED,
-                        "current_stage": ProcessingStage.FAILED,
+                    await status_manager.update_task_status(task_id, {
+                        "status": ProcessingStatus.FAILED.value,
+                        "current_stage": ProcessingStage.FAILED.value,
                         "processing_time": time.time() - start_time if 'start_time' in locals() else 0
                     })
-                    await StatusUpdateManager.add_error(
+                    await status_manager.add_error(
                         task_id, "unexpected_error", str(e), recoverable=False
                     )
                 finally:
                     # Ensure stage is marked complete in case of early failure
                     try:
-                        await StatusUpdateManager.complete_stage(task_id)
+                        await status_manager.complete_stage(task_id)
                     except Exception:
                         pass
 
-            # end async def process_repository
-
-            async def _update_progress(stage: str, progress: float, details: Optional[Dict] = None):
-                """Internal progress update callback."""
-                stage_mapping = {
-                    "cloning": ProcessingStage.CLONING,
-                    "analyzing": ProcessingStage.ANALYZING,
-                    "parsing": ProcessingStage.PARSING,
-                    "embedding": ProcessingStage.EMBEDDING,
-                    "storing": ProcessingStage.STORING,
-                    "validating": ProcessingStage.VALIDATING
-                }
-                
-                processing_stage = stage_mapping.get(stage, ProcessingStage.ANALYZING)
-                
-                updates = {
-                    "overall_progress": progress,
-                    "current_stage": processing_stage
-                }
-                
-                if details:
-                    if "current_file" in details:
-                        updates["current_file"] = details["current_file"]
-                    if "processed_files" in details:
-                        updates["processed_files"] = details["processed_files"]
-                    if "total_files" in details:
-                        updates["total_files"] = details["total_files"]
-                    if "generated_chunks" in details:
-                        updates["generated_chunks"] = details["generated_chunks"]
-                    if "embedding_progress" in details:
-                        updates["embedding_progress"] = EmbeddingProgress(**details["embedding_progress"])
-                
-                await StatusUpdateManager.update_task_status(task_id, updates)
-
-            # Start the task
-            processing_tasks[task_id] = asyncio.create_task(process_repository())
+            # Start the background task
+            background_tasks.add_task(process_repository)
             
             # Return initial status
             return IndexingStatusResponse(
+                task_id=task_id,
                 repository_name=request.name,
                 status=ProcessingStatus.IN_PROGRESS,
                 progress=0.0,
@@ -518,6 +491,7 @@ async def index_repository_local(
     request: LocalRepositoryIndexRequest,
     background_tasks: BackgroundTasks,
     processor: EnhancedRepositoryProcessor = Depends(get_repository_processor),
+    redis_client: RedisClient = Depends(get_redis_client),
     dry_run: bool = QueryParam(default=False, description="Analyze and estimate without writing to Neo4j/Chroma")
 ):
     """
@@ -548,20 +522,23 @@ async def index_repository_local(
         task_id = f"{request.name}_{int(time.time())}"
         run_id = __import__("uuid").uuid4().hex
 
+        status_manager = StatusUpdateManager(redis_client)
+
         async def process_local_repository():
             try:
-                # Initialize enhanced status tracking
-                task_status[task_id] = EnhancedIndexingStatus(
+                # Initialize enhanced status tracking in Redis
+                initial_status = EnhancedIndexingStatus(
                     repository_name=request.name,
                     task_id=task_id,
                     run_id=run_id,
                     status=ProcessingStatus.IN_PROGRESS,
                     current_stage=ProcessingStage.ANALYZING,
                     started_at=datetime.now()
-                )
+                ).dict()
+                await redis_client.set_task_status(task_id, initial_status)
 
                 # Stage 1: Analysis (no cloning needed for local repos)
-                await StatusUpdateManager.add_stage_progress(
+                await status_manager.add_stage_progress(
                     task_id, ProcessingStage.ANALYZING,
                     current_operation="Analyzing local repository structure"
                 )
@@ -576,15 +553,19 @@ async def index_repository_local(
                         local_config, 
                         run_id=run_id,
                         progress_callback=lambda stage, progress, details=None: 
-                            asyncio.create_task(_update_local_progress(stage, progress, details))
+                            asyncio.create_task(status_manager.update_task_status(task_id, {
+                                'current_stage': stage,
+                                'overall_progress': progress,
+                                **(details or {})
+                            }))
                     )
 
-                await StatusUpdateManager.complete_stage(task_id)
+                await status_manager.complete_stage(task_id)
                 
                 # Update final status
-                await StatusUpdateManager.update_task_status(task_id, {
-                    "status": result.status,
-                    "current_stage": ProcessingStage.COMPLETED if result.status == ProcessingStatus.COMPLETED else ProcessingStage.FAILED,
+                await status_manager.update_task_status(task_id, {
+                    "status": result.status.value,
+                    "current_stage": (ProcessingStage.COMPLETED if result.status == ProcessingStatus.COMPLETED else ProcessingStatus.FAILED).value,
                     "overall_progress": 100.0,
                     "processed_files": result.processed_files,
                     "generated_chunks": result.generated_chunks,
@@ -595,56 +576,26 @@ async def index_repository_local(
                 })
 
                 if result.error_message:
-                    await StatusUpdateManager.add_error(
+                    await status_manager.add_error(
                         task_id, "processing_error", result.error_message, recoverable=False
                     )
 
             except Exception as e:
-                await StatusUpdateManager.update_task_status(task_id, {
-                    "status": ProcessingStatus.FAILED,
-                    "current_stage": ProcessingStage.FAILED,
+                await status_manager.update_task_status(task_id, {
+                    "status": ProcessingStatus.FAILED.value,
+                    "current_stage": ProcessingStage.FAILED.value,
                     "processing_time": time.time() - start_time if 'start_time' in locals() else 0
                 })
-                await StatusUpdateManager.add_error(
+                await status_manager.add_error(
                     task_id, "unexpected_error", str(e), recoverable=False
                 )
 
-        async def _update_local_progress(stage: str, progress: float, details: Optional[Dict] = None):
-            """Internal progress update callback for local repositories."""
-            stage_mapping = {
-                "analyzing": ProcessingStage.ANALYZING,
-                "parsing": ProcessingStage.PARSING,
-                "embedding": ProcessingStage.EMBEDDING,
-                "storing": ProcessingStage.STORING,
-                "validating": ProcessingStage.VALIDATING
-            }
-            
-            processing_stage = stage_mapping.get(stage, ProcessingStage.ANALYZING)
-            
-            updates = {
-                "overall_progress": progress,
-                "current_stage": processing_stage
-            }
-            
-            if details:
-                if "current_file" in details:
-                    updates["current_file"] = details["current_file"]
-                if "processed_files" in details:
-                    updates["processed_files"] = details["processed_files"]
-                if "total_files" in details:
-                    updates["total_files"] = details["total_files"]
-                if "generated_chunks" in details:
-                    updates["generated_chunks"] = details["generated_chunks"]
-                if "embedding_progress" in details:
-                    updates["embedding_progress"] = EmbeddingProgress(**details["embedding_progress"])
-            
-            await StatusUpdateManager.update_task_status(task_id, updates)
-
-        # Start the task
-        processing_tasks[task_id] = asyncio.create_task(process_local_repository())
+        # Start the background task
+        background_tasks.add_task(process_local_repository)
         
         # Return initial status
         return IndexingStatusResponse(
+            task_id=task_id,
             repository_name=request.name,
             status=ProcessingStatus.IN_PROGRESS,
             progress=0.0,
@@ -661,7 +612,8 @@ async def index_repository_local(
 async def bulk_index_repositories(
     request: BulkIndexRequest,
     background_tasks: BackgroundTasks,
-    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor),
+    redis_client: RedisClient = Depends(get_redis_client)
 ):
     """
     Index multiple repositories in bulk.
@@ -687,21 +639,25 @@ async def bulk_index_repositories(
         
         # Start bulk processing
         task_id = f"bulk_{int(time.time())}"
+        run_id = __import__("uuid").uuid4().hex
+
+        status_manager = StatusUpdateManager(redis_client)
         
         async def process_bulk():
             try:
                 # Initialize bulk processing status
-                task_status[task_id] = EnhancedIndexingStatus(
+                initial_status = EnhancedIndexingStatus(
                     repository_name=f"bulk_processing_{len(repo_configs)}_repos",
                     task_id=task_id,
-                    run_id=f"bulk_{int(time.time())}",
+                    run_id=run_id,
                     status=ProcessingStatus.IN_PROGRESS,
                     current_stage=ProcessingStage.QUEUED,
                     started_at=datetime.now(),
                     total_files=len(repo_configs)  # Using total_files to track repositories
-                )
+                ).dict()
+                await redis_client.set_task_status(task_id, initial_status)
                 
-                await StatusUpdateManager.add_stage_progress(
+                await status_manager.add_stage_progress(
                     task_id, ProcessingStage.ANALYZING,
                     current_operation=f"Processing {len(repo_configs)} repositories in bulk"
                 )
@@ -712,7 +668,7 @@ async def bulk_index_repositories(
                 results = []
                 for i, repo_config in enumerate(repo_configs):
                     try:
-                        await StatusUpdateManager.update_task_status(task_id, {
+                        await status_manager.update_task_status(task_id, {
                             "current_file": f"Repository: {repo_config.name}",
                             "processed_files": i,
                             "overall_progress": (i / len(repo_configs)) * 100
@@ -722,14 +678,14 @@ async def bulk_index_repositories(
                         results.append(result)
                         
                         if result.status == ProcessingStatus.FAILED:
-                            await StatusUpdateManager.add_error(
+                            await status_manager.add_error(
                                 task_id, "repository_failed", 
                                 f"Failed to process {repo_config.name}: {result.error_message}",
                                 recoverable=True
                             )
                         
                     except Exception as e:
-                        await StatusUpdateManager.add_error(
+                        await status_manager.add_error(
                             task_id, "repository_error",
                             f"Error processing {repo_config.name}: {str(e)}",
                             recoverable=True
@@ -740,9 +696,9 @@ async def bulk_index_repositories(
                 failed = sum(1 for r in results if r.status == ProcessingStatus.FAILED)
                 total_chunks = sum(r.generated_chunks for r in results)
                 
-                await StatusUpdateManager.update_task_status(task_id, {
-                    "status": ProcessingStatus.COMPLETED,
-                    "current_stage": ProcessingStage.COMPLETED,
+                await status_manager.update_task_status(task_id, {
+                    "status": ProcessingStatus.COMPLETED.value,
+                    "current_stage": ProcessingStage.COMPLETED.value,
                     "overall_progress": 100.0,
                     "processed_files": len(repo_configs),
                     "generated_chunks": total_chunks,
@@ -751,20 +707,23 @@ async def bulk_index_repositories(
                 })
                 
                 # Store bulk results in a custom field (extend model if needed)
-                task_status[task_id].warnings.append(f"Bulk processing completed: {completed} successful, {failed} failed")
+                current_status = await redis_client.get_task_status(task_id)
+                if current_status:
+                    current_status['warnings'].append(f"Bulk processing completed: {completed} successful, {failed} failed")
+                    await redis_client.set_task_status(task_id, current_status)
                 
             except Exception as e:
-                await StatusUpdateManager.update_task_status(task_id, {
-                    "status": ProcessingStatus.FAILED,
-                    "current_stage": ProcessingStage.FAILED,
+                await status_manager.update_task_status(task_id, {
+                    "status": ProcessingStatus.FAILED.value,
+                    "current_stage": ProcessingStage.FAILED.value,
                     "processing_time": time.time() - start_time if 'start_time' in locals() else 0
                 })
-                await StatusUpdateManager.add_error(
+                await status_manager.add_error(
                     task_id, "bulk_processing_error", str(e), recoverable=False
                 )
         
-        # Start the task
-        processing_tasks[task_id] = asyncio.create_task(process_bulk())
+        # Start the background task
+        background_tasks.add_task(process_bulk)
         
         return {
             "task_id": task_id,
@@ -777,41 +736,88 @@ async def bulk_index_repositories(
         raise HTTPException(status_code=500, detail=f"Failed to start bulk indexing: {str(e)}")
 
 
+# Safe wrapper: return None instead of raising when Redis client is not initialized
+async def try_get_redis_client() -> Optional[RedisClient]:
+    try:
+        return await get_redis_client()
+    except Exception:
+        return None
+
+
+@router.get("/status")
+async def get_all_indexing_statuses(redis_client: Optional[RedisClient] = Depends(try_get_redis_client)):
+    """
+    Return a summary of all active and recently tracked indexing tasks.
+
+    This endpoint is used by the frontend ActiveIndexingTasks panel to poll for
+    all current tasks without needing a specific task_id. It aggregates the
+    Redis-backed task_status:* keys and returns a compact list.
+
+    If Redis is not initialized (e.g., startup dependencies failed), return an empty list
+    with a warning so the frontend UI remains stable instead of 500.
+    """
+    if not redis_client:
+        return {
+            "tasks": [],
+            "total": 0,
+            "warning": "redis_unavailable: client_not_initialized",
+            "timestamp": datetime.now().isoformat()
+        }
+
+    try:
+        all_statuses: Dict[str, Dict[str, Any]] = await redis_client.get_all_task_statuses()
+    except Exception as e:
+        # Resilient fallback when redis_client is unreachable
+        return {
+            "tasks": [],
+            "total": 0,
+            "warning": f"redis_unavailable: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+    summaries = []
+    for task_id, status in all_statuses.items():
+        try:
+            summaries.append({
+                "task_id": task_id,
+                "repository_name": status.get("repository_name"),
+                "status": status.get("status"),
+                "current_stage": status.get("current_stage"),
+                "overall_progress": status.get("overall_progress"),
+                "processed_files": status.get("processed_files"),
+                "generated_chunks": status.get("generated_chunks"),
+                "started_at": status.get("started_at"),
+                "estimated_completion": status.get("estimated_completion"),
+                "errors_count": len(status.get("errors", [])),
+                "warnings_count": len(status.get("warnings", [])),
+            })
+        except Exception:
+            continue
+
+    return {
+        "tasks": summaries,
+        "total": len(summaries),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
 @router.get("/status/{task_id}", response_model=EnhancedIndexingStatus)
-async def get_indexing_status(task_id: str):
+async def get_indexing_status(task_id: str, redis_client: RedisClient = Depends(get_redis_client)):
     """
     Get the enhanced status of an indexing task.
     
     This endpoint returns comprehensive status and progress information
     including stage tracking, embedding progress, and error details.
     """
-    if task_id not in task_status:
+    status_data = await redis_client.get_task_status(task_id)
+    if not status_data:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    status = task_status[task_id]
-    
-    # Check if task is complete and clean up
-    if task_id in processing_tasks:
-        task = processing_tasks[task_id]
-        if task.done():
-            # Task is finished, clean up
-            del processing_tasks[task_id]
-            
-            # Update final status if needed
-            if task.exception():
-                await StatusUpdateManager.add_error(
-                    task_id, "task_exception", str(task.exception()), recoverable=False
-                )
-                await StatusUpdateManager.update_task_status(task_id, {
-                    "status": ProcessingStatus.FAILED,
-                    "current_stage": ProcessingStage.FAILED
-                })
-    
-    return status
+    return EnhancedIndexingStatus(**status_data)
 
 
 @router.websocket("/status/{task_id}/stream")
-async def stream_indexing_status(websocket: WebSocket, task_id: str):
+async def stream_indexing_status(websocket: WebSocket, task_id: str, redis_client: RedisClient = Depends(get_redis_client)):
     """
     WebSocket endpoint for real-time indexing status updates.
     
@@ -827,11 +833,12 @@ async def stream_indexing_status(websocket: WebSocket, task_id: str):
     
     try:
         # Send initial status if task exists
-        if task_id in task_status:
+        initial_status_data = await redis_client.get_task_status(task_id)
+        if initial_status_data:
             initial_message = {
                 "type": "initial_status",
                 "task_id": task_id,
-                "data": task_status[task_id].dict()
+                "data": initial_status_data
             }
             await websocket.send_text(json.dumps(initial_message, default=str))
         else:
@@ -845,8 +852,8 @@ async def stream_indexing_status(websocket: WebSocket, task_id: str):
         # Keep connection alive and handle client messages
         while True:
             try:
-                # Wait for client messages (ping/pong, etc.)
-                message = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                # Wait for client messages (ping/pong, etc.) with a longer timeout
+                message = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
                 
                 # Handle client messages
                 try:
@@ -859,13 +866,20 @@ async def stream_indexing_status(websocket: WebSocket, task_id: str):
                     pass
                     
             except asyncio.TimeoutError:
-                # Send periodic heartbeat
+                # Send periodic heartbeat to keep connection alive
                 heartbeat = {
                     "type": "heartbeat",
                     "timestamp": datetime.now().isoformat(),
                     "task_id": task_id
                 }
-                await websocket.send_text(json.dumps(heartbeat))
+                try:
+                    await websocket.send_text(json.dumps(heartbeat))
+                except WebSocketDisconnect:
+                    # Client disconnected, break the loop
+                    break
+                except Exception:
+                    # Other send error, break the loop
+                    break
                 
     except WebSocketDisconnect:
         # Client disconnected
@@ -892,23 +906,23 @@ async def stream_indexing_status(websocket: WebSocket, task_id: str):
 
 
 @router.get("/status/{task_id}/logs")
-async def get_indexing_logs(task_id: str, level: str = QueryParam(default="INFO")):
+async def get_indexing_logs(task_id: str, level: str = QueryParam(default="INFO"), redis_client: RedisClient = Depends(get_redis_client)):
     """
     Get detailed logs for an indexing task.
     
     This endpoint returns structured logs with filtering capabilities
     for debugging and monitoring indexing operations.
     """
-    if task_id not in task_status:
+    status = await redis_client.get_task_status(task_id)
+    if not status:
         raise HTTPException(status_code=404, detail="Task not found")
-    
-    status = task_status[task_id]
     
     # Compile logs from various sources
     logs = []
     
     # Stage history logs
-    for stage_progress in status.stage_history:
+    for stage_progress_data in status['stage_history']:
+        stage_progress = StageProgress(**stage_progress_data)
         logs.append({
             "timestamp": stage_progress.started_at,
             "level": "INFO",
@@ -927,12 +941,13 @@ async def get_indexing_logs(task_id: str, level: str = QueryParam(default="INFO"
                 "stage": stage_progress.stage,
                 "message": f"Stage {stage_progress.stage} completed",
                 "details": {
-                    "duration": (stage_progress.completed_at - stage_progress.started_at).total_seconds()
+                    "duration": (datetime.fromisoformat(stage_progress.completed_at) - stage_progress.started_at).total_seconds()
                 }
             })
     
     # Error logs
-    for error in status.errors:
+    for error_data in status['errors']:
+        error = IndexingError(**error_data)
         logs.append({
             "timestamp": error.timestamp,
             "level": "ERROR",
@@ -946,11 +961,11 @@ async def get_indexing_logs(task_id: str, level: str = QueryParam(default="INFO"
         })
     
     # Warning logs
-    for warning in status.warnings:
+    for warning in status['warnings']:
         logs.append({
             "timestamp": datetime.now(),  # Warnings don't have timestamps in current model
             "level": "WARNING",
-            "stage": status.current_stage,
+            "stage": status['current_stage'],
             "message": warning,
             "details": {}
         })
@@ -965,98 +980,26 @@ async def get_indexing_logs(task_id: str, level: str = QueryParam(default="INFO"
     
     return {
         "task_id": task_id,
-        "repository_name": status.repository_name,
+        "repository_name": status['repository_name'],
         "log_level": level,
         "total_logs": len(filtered_logs),
         "logs": filtered_logs
     }
 
 
-@router.get("/status")
-async def get_all_indexing_status():
-    """
-    Get the status of all indexing tasks with enhanced information.
-    
-    This endpoint returns comprehensive status information for all tracked
-    indexing tasks including stage summaries and performance metrics.
-    """
-    # Clean up completed tasks
-    completed_tasks = []
-    for task_id, task in processing_tasks.items():
-        if task.done():
-            completed_tasks.append(task_id)
-    
-    for task_id in completed_tasks:
-        del processing_tasks[task_id]
-    
-    # Calculate summary statistics
-    active_tasks = len(processing_tasks)
-    total_tasks = len(task_status)
-    
-    # Stage distribution
-    stage_counts = {}
-    status_counts = {}
-    total_files_processed = 0
-    total_chunks_generated = 0
-    
-    for status in task_status.values():
-        # Count by stage
-        stage = status.current_stage
-        stage_counts[stage] = stage_counts.get(stage, 0) + 1
-        
-        # Count by status
-        status_val = status.status
-        status_counts[status_val] = status_counts.get(status_val, 0) + 1
-        
-        # Aggregate metrics
-        total_files_processed += status.processed_files
-        total_chunks_generated += status.generated_chunks
-    
-    # Recent activity (last 10 tasks)
-    recent_tasks = sorted(
-        task_status.values(),
-        key=lambda x: x.started_at,
-        reverse=True
-    )[:10]
-    
-    return {
-        "summary": {
-            "active_tasks": active_tasks,
-            "total_tracked_tasks": total_tasks,
-            "total_files_processed": total_files_processed,
-            "total_chunks_generated": total_chunks_generated,
-            "stage_distribution": stage_counts,
-            "status_distribution": status_counts
-        },
-        "recent_tasks": [
-            {
-                "task_id": task.task_id,
-                "repository_name": task.repository_name,
-                "status": task.status,
-                "current_stage": task.current_stage,
-                "progress": task.overall_progress,
-                "started_at": task.started_at,
-                "processing_time": task.processing_time,
-                "error_count": len(task.errors)
-            }
-            for task in recent_tasks
-        ],
-        "active_websocket_connections": sum(len(clients) for clients in active_websockets.values()),
-        "task_statuses": {task_id: status.dict() for task_id, status in task_status.items()}
-    }
-
-
 @router.get("/metrics/stages")
-async def get_stage_metrics():
+async def get_stage_metrics(redis_client: RedisClient = Depends(get_redis_client)):
     """
     Get detailed metrics about processing stages across all tasks.
     
     This endpoint provides insights into stage performance, bottlenecks,
     and processing patterns for monitoring and optimization.
     """
+    all_statuses = await redis_client.get_all_task_statuses()
     stage_metrics = {}
     
-    for status in task_status.values():
+    for status_data in all_statuses.values():
+        status = EnhancedIndexingStatus(**status_data)
         for stage_progress in status.stage_history:
             stage = stage_progress.stage
             
@@ -1076,7 +1019,7 @@ async def get_stage_metrics():
             metrics["total_executions"] += 1
             
             if stage_progress.completed_at:
-                duration = (stage_progress.completed_at - stage_progress.started_at).total_seconds()
+                duration = (datetime.fromisoformat(stage_progress.completed_at) - stage_progress.started_at).total_seconds()
                 metrics["total_duration"] += duration
                 metrics["min_duration"] = min(metrics["min_duration"], duration)
                 metrics["max_duration"] = max(metrics["max_duration"], duration)
@@ -1104,13 +1047,14 @@ async def get_stage_metrics():
 
 
 @router.get("/metrics/embedding")
-async def get_embedding_metrics():
+async def get_embedding_metrics(redis_client: RedisClient = Depends(get_redis_client)):
     """
     Get detailed metrics about embedding generation across all tasks.
     
     This endpoint provides insights into embedding performance, throughput,
     and quality metrics for CodeBERT processing optimization.
     """
+    all_statuses = await redis_client.get_all_task_statuses()
     embedding_metrics = {
         "total_chunks_embedded": 0,
         "total_embedding_time": 0.0,
@@ -1128,7 +1072,8 @@ async def get_embedding_metrics():
     repositories_with_embeddings = set()
     total_embedding_rates = []
     
-    for status in task_status.values():
+    for status_data in all_statuses.values():
+        status = EnhancedIndexingStatus(**status_data)
         if status.embedding_progress.total_chunks > 0:
             repositories_with_embeddings.add(status.repository_name)
             embedding_metrics["total_chunks_embedded"] += status.embedding_progress.embedded_chunks
@@ -1157,7 +1102,8 @@ async def get_embedding_metrics():
 async def update_repository(
     repository_name: str,
     background_tasks: BackgroundTasks,
-    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor),
+    redis_client: RedisClient = Depends(get_redis_client)
 ):
     """
     Perform incremental update for a repository.
@@ -1168,20 +1114,26 @@ async def update_repository(
     try:
         # Start incremental update
         task_id = f"{repository_name}_update_{int(time.time())}"
+        run_id = __import__("uuid").uuid4().hex
+
+        status_manager = StatusUpdateManager(redis_client)
         
         async def perform_update():
             try:
-                task_status[task_id] = {
-                    "repository_name": repository_name,
-                    "status": ProcessingStatus.IN_PROGRESS,
-                    "update_type": "incremental",
-                    "started_at": time.time()
-                }
+                initial_status = EnhancedIndexingStatus(
+                    repository_name=repository_name,
+                    task_id=task_id,
+                    run_id=run_id,
+                    status=ProcessingStatus.IN_PROGRESS,
+                    current_stage=ProcessingStage.QUEUED,
+                    started_at=datetime.now()
+                ).dict()
+                await redis_client.set_task_status(task_id, initial_status)
                 
                 result = await processor.incremental_update(repository_name)
                 
-                task_status[task_id].update({
-                    "status": result.status,
+                await status_manager.update_task_status(task_id, {
+                    "status": result.status.value,
                     "processing_time": result.processing_time,
                     "processed_files": result.processed_files,
                     "generated_chunks": result.generated_chunks,
@@ -1189,13 +1141,13 @@ async def update_repository(
                 })
                 
             except Exception as e:
-                task_status[task_id].update({
-                    "status": ProcessingStatus.FAILED,
+                await status_manager.update_task_status(task_id, {
+                    "status": ProcessingStatus.FAILED.value,
                     "error_message": str(e)
                 })
         
-        # Start the task
-        processing_tasks[task_id] = asyncio.create_task(perform_update())
+        # Start the background task
+        background_tasks.add_task(perform_update)
         
         return {
             "task_id": task_id,
@@ -1433,7 +1385,8 @@ async def get_repository_details(
 
 @router.get("/statistics")
 async def get_indexing_statistics(
-    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor)
+    processor: EnhancedRepositoryProcessor = Depends(get_repository_processor),
+    redis_client: RedisClient = Depends(get_redis_client)
 ):
     """
     Get indexing pipeline statistics.
@@ -1443,11 +1396,15 @@ async def get_indexing_statistics(
     """
     try:
         stats = await processor.get_processing_statistics()
+        all_statuses = await redis_client.get_all_task_statuses()
         
+        active_tasks = sum(1 for status in all_statuses.values() if status['status'] == ProcessingStatus.IN_PROGRESS.value)
+        total_tracked_tasks = len(all_statuses)
+
         return {
             "processing_statistics": stats,
-            "active_tasks": len(processing_tasks),
-            "tracked_tasks": len(task_status),
+            "active_tasks": active_tasks,
+            "tracked_tasks": total_tracked_tasks,
             "timestamp": time.time()
         }
         
@@ -1498,7 +1455,7 @@ async def optimize_indices(
 
 
 @router.post("/cleanup")
-async def cleanup_old_tasks():
+async def cleanup_old_tasks(redis_client: RedisClient = Depends(get_redis_client)):
     """
     Clean up old completed tasks.
     
@@ -1508,31 +1465,22 @@ async def cleanup_old_tasks():
         current_time = time.time()
         cleanup_threshold = 24 * 60 * 60  # 24 hours
         
-        # Remove old task statuses
-        old_tasks = []
-        for task_id, status in task_status.items():
-            started_at = status.get('started_at', current_time)
-            if current_time - started_at > cleanup_threshold:
-                old_tasks.append(task_id)
-        
-        for task_id in old_tasks:
-            del task_status[task_id]
-        
-        # Clean up completed processing tasks
-        completed_tasks = []
-        for task_id, task in processing_tasks.items():
-            if task.done():
-                completed_tasks.append(task_id)
-        
-        for task_id in completed_tasks:
-            del processing_tasks[task_id]
+        # Remove old task statuses from Redis
+        all_task_ids = await redis_client.client.keys("task_status:*")
+        cleaned_count = 0
+        for key in all_task_ids:
+            status_data = await redis_client.client.get(key)
+            if status_data:
+                status = json.loads(status_data)
+                started_at_timestamp = datetime.fromisoformat(status['started_at']).timestamp()
+                if current_time - started_at_timestamp > cleanup_threshold and status['status'] != ProcessingStatus.IN_PROGRESS.value:
+                    await redis_client.client.delete(key)
+                    cleaned_count += 1
         
         return {
             "status": "cleanup_completed",
-            "cleaned_task_statuses": len(old_tasks),
-            "cleaned_processing_tasks": len(completed_tasks),
-            "remaining_task_statuses": len(task_status),
-            "remaining_processing_tasks": len(processing_tasks)
+            "cleaned_task_statuses": cleaned_count,
+            "remaining_task_statuses": len(await redis_client.client.keys("task_status:*"))
         }
         
     except Exception as e:

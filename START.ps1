@@ -505,6 +505,15 @@ sys.exit(asyncio.run(main()))
         }
     )
     
+    # Add Redis to the services to validate
+    $services += @{
+        Name = "Redis"
+        HealthUrl = $null
+        DatabasePort = 6379
+        ExpectedContent = $null
+        Critical = $true
+    }
+    
     # Add PostgreSQL if it's expected to be running
     if ($Mode -eq 'full') {
         $services += @{
@@ -632,6 +641,11 @@ sys.exit(asyncio.run(main()))
                     Write-Log "  Troubleshooting: Check API logs in the console or logs directory" "INFO" "VALIDATION"
                     Write-Log "  Troubleshooting: Verify Python dependencies: pip list | grep fastapi" "INFO" "VALIDATION"
                 }
+                "Redis" {
+                    Write-Log "  Troubleshooting: Check if Redis container is running: podman ps | grep redis" "INFO" "VALIDATION"
+                    Write-Log "  Troubleshooting: Check Redis logs: podman logs codebase-rag-redis" "INFO" "VALIDATION"
+                    Write-Log "  Troubleshooting: Test Redis connection: podman exec codebase-rag-redis redis-cli ping" "INFO" "VALIDATION"
+                }
                 "PostgreSQL" {
                     Write-Log "  Troubleshooting: Check if PostgreSQL container is running: podman ps | grep postgres" "INFO" "VALIDATION"
                     Write-Log "  Troubleshooting: Check PostgreSQL logs: podman logs postgres" "INFO" "VALIDATION"
@@ -738,6 +752,12 @@ function Show-SystemStatus {
             ExpectedContent = $null
         },
         @{
+            Name = "Redis"
+            Port = 6379
+            HealthUrl = $null
+            ExpectedContent = $null
+        },
+        @{
             Name = "API Server"
             Port = 8080
             HealthUrl = "http://localhost:8080/api/v1/health/"
@@ -813,6 +833,7 @@ function Show-SystemStatus {
     Write-Log "=== Access URLs ===" "INFO" "STATUS"
     Write-Host "ChromaDB API:   http://localhost:8000/api/v2/healthcheck" -ForegroundColor Cyan
     Write-Host "Neo4j Browser:  http://localhost:7474 (neo4j / codebase-rag-2024)" -ForegroundColor Cyan
+    Write-Host "Redis:          localhost:6379" -ForegroundColor Cyan
     Write-Host "API Server:     http://localhost:8080/api/v1/health/" -ForegroundColor Cyan
     Write-Host "Frontend App:   http://localhost:3000" -ForegroundColor Cyan
     
@@ -833,11 +854,14 @@ function Stop-TrackedProcesses {
     }
     
     try {
-        $pidData = Get-Content $PidTrackingFile -Raw | ConvertFrom-Json -AsHashtable
+        $pidData = Get-Content $PidTrackingFile -Raw | ConvertFrom-Json
         $killedCount = 0
         
-        foreach ($key in $pidData.Keys) {
-            $processPid = $pidData[$key]
+        # Get all properties of the JSON object
+        $properties = $pidData | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
+        
+        foreach ($key in $properties) {
+            $processPid = $pidData.$key
             try {
                 $process = Get-Process -Id $processPid -ErrorAction SilentlyContinue
                 if ($process) {
@@ -853,7 +877,7 @@ function Stop-TrackedProcesses {
         }
         
         # Clear the tracking file after stopping processes
-        @{} | ConvertTo-Json | Set-Content $PidTrackingFile
+        "{}" | Set-Content $PidTrackingFile
         Write-Log "Stopped $killedCount tracked processes" "INFO"
     } catch {
         Write-Log "Failed to process PID tracking file: $($_.Exception.Message)" "ERROR"
@@ -969,7 +993,7 @@ function Start-BackendServices {
     # Start only required services for MVP: chromadb and neo4j
     Write-Log "Launching ChromaDB and Neo4j using podman-compose.dev.yml..." "INFO" "BACKEND"
     try {
-        $composeResult = podman-compose -f podman-compose.dev.yml up -d chromadb neo4j 2>&1
+        $composeResult = podman-compose -f podman-compose.dev.yml up -d chromadb neo4j redis 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-Log "Failed to start backend services (exit code: $LASTEXITCODE)" "ERROR" "BACKEND"
             Write-Log "Compose output: $composeResult" "ERROR" "BACKEND"
@@ -1027,6 +1051,7 @@ function Start-BackendServices {
     Write-Log "Validating backend service connectivity..." "INFO" "BACKEND"
     $chromaConnectivity = Test-DatabaseConnectivity -ServiceName "ChromaDB" -Port 8000
     $neo4jConnectivity = Test-DatabaseConnectivity -ServiceName "Neo4j" -Port 7474
+    $redisConnectivity = Test-DatabaseConnectivity -ServiceName "Redis" -Port 6379
     
     if (-not $chromaConnectivity.Success) {
         Write-Log "ChromaDB connectivity validation failed: $($chromaConnectivity.Error)" "ERROR" "BACKEND"
@@ -1035,6 +1060,11 @@ function Start-BackendServices {
     
     if (-not $neo4jConnectivity.Success) {
         Write-Log "Neo4j connectivity validation failed: $($neo4jConnectivity.Error)" "ERROR" "BACKEND"
+        return $false
+    }
+    
+    if (-not $redisConnectivity.Success) {
+        Write-Log "Redis connectivity validation failed: $($redisConnectivity.Error)" "ERROR" "BACKEND"
         return $false
     }
     
@@ -1055,6 +1085,10 @@ function Start-ApiServer {
         if (Test-Path "src\main.py") {
             Write-Log "Starting FastAPI server with log level: $LogLevel" "INFO" "API"
             $env:LOG_LEVEL = $LogLevel
+            # Set Redis URL environment variable
+            $env:REDIS_URL = "redis://localhost:6379"
+            Write-Log "Setting Redis URL: $env:REDIS_URL" "INFO" "API"
+            
             # If caller forces a host API port, honor it (used to avoid 8080 collisions)
             if (-not $env:GRAFRAG_HOST_API_PORT -and $Mode -eq 'api') {
                 # In api mode, prefer 8081 by default to avoid container 8080
@@ -1116,7 +1150,12 @@ function Start-ApiServer {
                 try {
                     $pidData = @{}
                     if (Test-Path $PidTrackingFile) {
-                        $pidData = Get-Content $PidTrackingFile -Raw | ConvertFrom-Json -AsHashtable
+                        $existingData = Get-Content $PidTrackingFile -Raw | ConvertFrom-Json
+                        # Convert PSCustomObject to hashtable
+                        $properties = $existingData | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
+                        foreach ($prop in $properties) {
+                            $pidData[$prop] = $existingData.$prop
+                        }
                     }
                     $pidData["api_server"] = $apiProcess.Id
                     $pidData | ConvertTo-Json | Set-Content $PidTrackingFile
@@ -1252,7 +1291,12 @@ function Start-Frontend {
         try {
             $pidData = @{}
             if (Test-Path $PidTrackingFile) {
-                $pidData = Get-Content $PidTrackingFile -Raw | ConvertFrom-Json -AsHashtable
+                $existingData = Get-Content $PidTrackingFile -Raw | ConvertFrom-Json
+                # Convert PSCustomObject to hashtable
+                $properties = $existingData | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
+                foreach ($prop in $properties) {
+                    $pidData[$prop] = $existingData.$prop
+                }
             }
             $pidData["frontend"] = $frontendPid
             $pidData | ConvertTo-Json | Set-Content $PidTrackingFile
@@ -1484,6 +1528,9 @@ function Main {
                 } else {
                     if (-not $env:GRAFRAG_HOST_API_PORT) { $env:GRAFRAG_HOST_API_PORT = "8081" }
                     $hostPort = [int]$env:GRAFRAG_HOST_API_PORT
+                    # Set Redis URL environment variable
+                    $env:REDIS_URL = "redis://localhost:6379"
+                    Write-Log "Setting Redis URL: $env:REDIS_URL" "INFO" "API"
                     try {
                         $cwd = (Get-Location).Path
                         $env:PYTHONPATH = $cwd
@@ -1509,6 +1556,9 @@ function Main {
                 } else {
                     if (-not $env:GRAFRAG_HOST_API_PORT) { $env:GRAFRAG_HOST_API_PORT = "8081" }
                     $hostPort = [int]$env:GRAFRAG_HOST_API_PORT
+                    # Set Redis URL environment variable
+                    $env:REDIS_URL = "redis://localhost:6379"
+                    Write-Log "Setting Redis URL: $env:REDIS_URL" "INFO" "API"
                     try {
                         $cwd = (Get-Location).Path
                         $env:PYTHONPATH = $cwd

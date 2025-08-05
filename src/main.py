@@ -86,6 +86,8 @@ except TypeError:
 from .core.performance_metrics import performance_collector
 from .core.exceptions import GraphRAGException, ErrorContext
 from .core.diagnostics import diagnostic_collector
+# Redis client lifecycle
+from .core.redis_client import create_redis_client, close_redis_client
 
 
 async def initialize_clients_async(app: FastAPI):
@@ -345,6 +347,13 @@ async def lifespan(app: FastAPI):
     # Initialize ready state
     app.state.is_ready = False
     app.state.initialization_error = None
+    # Initialize Redis early and non-blocking for task tracking availability
+    try:
+        await create_redis_client()
+        logger.info("Redis client initialized during lifespan startup")
+    except Exception as re:
+        # Do not block app start if Redis is unavailable; status endpoints will degrade gracefully
+        logger.warning(f"Redis client initialization skipped (non-fatal): {re}")
     
     # Phase 0: Configuration validation (blocking - must pass before proceeding)
     logger.info("=== LIFESPAN: Running configuration validation ===")
@@ -439,6 +448,12 @@ async def lifespan(app: FastAPI):
     logging.info("🛑 Shutting down Enhanced GraphRAG v2.0 application...")
     
     # Ensure latest client refs from app.state are closed (avoid stale dependencies.* refs)
+    # Close Redis client gracefully
+    try:
+        await close_redis_client()
+    except Exception as re:
+        logging.error(f"Error closing Redis client: {re}")
+        
     chroma_ref = getattr(app.state, "chroma_client", None) or getattr(dependencies, "chroma_client", None)
     if chroma_ref:
         try:

@@ -755,7 +755,7 @@ class EnhancedRepositoryProcessor:
 
                 # Phase 2: Repository analysis (reuse existing logic)
                 t1 = time.time()
-                analysis = await self._analyze_repository_async(repo_path, local_config)
+                analysis = await self._analyze_repository_async(repo_path, local_config, progress_callback=progress_callback)
                 log_stage("analyze_done",
                           elapsed_ms=int((time.time() - t1) * 1000),
                           file_count=analysis.get('file_count', 0),
@@ -1036,17 +1036,18 @@ class EnhancedRepositoryProcessor:
                 recoverable=True
             )
     
-    async def _analyze_repository_async(self, repo_path: Path, repo_config: RepositoryConfig) -> Dict[str, Any]:
+    async def _analyze_repository_async(self, repo_path: Path, repo_config: Union[RepositoryConfig, LocalRepositoryConfig], progress_callback: Optional[callable] = None) -> Dict[str, Any]:
         """
         Analyze repository structure asynchronously.
         
         Args:
             repo_path: Path to repository
             repo_config: Repository configuration
+            progress_callback: Optional async function to report progress
             
         Returns:
             Dict[str, Any]: Repository analysis results
-        """
+        """#
         analysis = {
             'languages': set(),
             'file_count': 0,
@@ -1107,6 +1108,15 @@ class EnhancedRepositoryProcessor:
                 
                 # Yield control periodically
                 await asyncio.sleep(0)
+
+                # Report progress if callback is provided
+                if progress_callback:
+                    progress_percent = 20.0 + (i / len(filtered_files)) * 20.0  # 20-40% range
+                    await progress_callback("analyzing", progress_percent, {
+                        "current_operation": f"Analyzed batch {i//batch_size + 1}",
+                        "processed_files": i + len(batch),
+                        "total_files": len(filtered_files)
+                    })
             
             # Finalize analysis
             analysis['file_count'] = len(filtered_files)
@@ -1262,7 +1272,7 @@ class EnhancedRepositoryProcessor:
                     except Exception as e:
                         self.logger.warning(f"Progress callback error: {e}")
                 
-                batch_results = await self._process_file_batch_async(batch, repo_path, repo_config)
+                batch_results = await self._process_file_batch_async(batch, repo_path, repo_config, progress_callback)
                 
                 files_data.extend(batch_results['files'])
                 all_chunks.extend(batch_results['chunks'])
@@ -1312,7 +1322,8 @@ class EnhancedRepositoryProcessor:
     async def _process_file_batch_async(self, 
                                        files: List[Path], 
                                        repo_path: Path,
-                                       repo_config: RepositoryConfig) -> Dict[str, Any]:
+                                       repo_config: RepositoryConfig,
+                                       progress_callback: Optional[callable] = None) -> Dict[str, Any]:
         """
         Process a batch of files asynchronously (no threading).
         
@@ -1320,6 +1331,7 @@ class EnhancedRepositoryProcessor:
             files: Files to process
             repo_path: Repository root path
             repo_config: Repository configuration
+            progress_callback: Optional async function to report progress
             
         Returns:
             Dict[str, Any]: Batch processing results
@@ -1371,6 +1383,16 @@ class EnhancedRepositoryProcessor:
                 # Yield control periodically for async processing
                 if len(batch_files) % 5 == 0:
                     await asyncio.sleep(0)
+
+                # Report progress if callback is provided
+                if progress_callback:
+                    progress_percent = 40.0 + (len(batch_files) / len(files)) * 40.0  # 40-80% range
+                    await progress_callback("parsing", progress_percent, {
+                        "current_file": rel_path,
+                        "processed_files": len(batch_files),
+                        "total_files": len(files),
+                        "generated_chunks": len(batch_chunks)
+                    })
                 
             except Exception as e:
                 self.logger.warning(f"Error processing file {file_path}: {e}")

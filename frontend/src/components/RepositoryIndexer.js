@@ -20,9 +20,8 @@ function RepositoryIndexer({ repositories, onRefresh }) {
   const { isReady, status, isLoading: healthLoading, error: healthError } = useSystemHealth();
   
   // Real-time progress tracking
-  const [currentTaskId, setCurrentTaskId] = useState(null);
+  const [indexingTask, setIndexingTask] = useState(null); // { taskId, repositoryName }
   const [showProgressDialog, setShowProgressDialog] = useState(false);
-  const [progressDialogRepo, setProgressDialogRepo] = useState('');
 
   const handlePathChange = (event) => {
     const path = event.target.value;
@@ -91,14 +90,17 @@ function RepositoryIndexer({ repositories, onRefresh }) {
         });
       }
       
-      // Extract task ID from the response or generate one based on the expected backend format
-      // The backend generates task IDs as: `${repository_name}_${timestamp}`
-      const taskId = indexResult.task_id || `${repoName.trim()}_${Math.floor(Date.now() / 1000)}`;
-      setCurrentTaskId(taskId);
-      setProgressDialogRepo(repoName.trim());
+      // Use the official task_id from the backend response
+      const taskId = indexResult.task_id;
+      if (!taskId) {
+        throw new Error('Backend did not return a task_id for progress tracking.');
+      }
+
+      setIndexingTask({ taskId: taskId, repositoryName: repoName.trim() });
       setShowProgressDialog(true);
       
-      setResult(indexResult);
+      // Do not show immediate success, wait for the progress component to report completion
+      // setResult(indexResult); 
       
       // Clear form
       setRepoPath('');
@@ -113,7 +115,7 @@ function RepositoryIndexer({ repositories, onRefresh }) {
   const handleProgressComplete = (finalStatus) => {
     setIndexing(false);
     setShowProgressDialog(false);
-    setCurrentTaskId(null);
+    setIndexingTask(null);
     
     // Refresh the repositories list
     if (onRefresh) {
@@ -132,14 +134,14 @@ function RepositoryIndexer({ repositories, onRefresh }) {
   const handleProgressError = (errorStatus) => {
     setIndexing(false);
     setShowProgressDialog(false);
-    setCurrentTaskId(null);
+    setIndexingTask(null);
     
     setError(errorStatus.error_message || 'Indexing failed with unknown error');
   };
 
   const handleCloseProgressDialog = () => {
     setShowProgressDialog(false);
-    setCurrentTaskId(null);
+    setIndexingTask(null);
     setIndexing(false);
   };
 
@@ -327,9 +329,8 @@ function RepositoryIndexer({ repositories, onRefresh }) {
       {renderExamplePaths()}
 
       {/* Active Indexing Tasks */}
-      <ActiveIndexingTasks onViewProgress={(taskId, repoName) => {
-        setCurrentTaskId(taskId);
-        setProgressDialogRepo(repoName);
+      <ActiveIndexingTasks onViewProgress={(taskId, repositoryName) => {
+        setIndexingTask({ taskId, repositoryName });
         setShowProgressDialog(true);
       }} />
 
@@ -350,7 +351,7 @@ function RepositoryIndexer({ repositories, onRefresh }) {
                   <ListItemText
                     primary={<Typography component="span">{repo.name || repo}</Typography>}
                     secondary={
-                      <Box>
+                      <Box component="span">
                         <Typography variant="body2" component="span">
                           {repo.status ? `Status: ${repo.status} | Files: ${repo.indexed_files || 0}` : `Repository ${index + 1}`}
                         </Typography>
@@ -405,14 +406,14 @@ function RepositoryIndexer({ repositories, onRefresh }) {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <Visibility />
             <Typography variant="h6">
-              Indexing Progress: {progressDialogRepo}
+              Indexing Progress: {indexingTask?.repositoryName}
             </Typography>
           </Box>
         </DialogTitle>
         <DialogContent>
           <RealTimeIndexingProgress
-            taskId={currentTaskId}
-            repositoryName={progressDialogRepo}
+            taskId={indexingTask?.taskId}
+            repositoryName={indexingTask?.repositoryName}
             onComplete={handleProgressComplete}
             onError={handleProgressError}
           />

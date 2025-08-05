@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Any, List, Optional, Union
 import logging
+from datetime import datetime, timezone
 
 
 class ErrorSeverity(str, Enum):
@@ -134,10 +135,16 @@ class GraphRAGException(Exception):
         # Core error information
         self.error_id = str(uuid.uuid4())
         self.message = message
-        self.error_code = error_code or self._generate_error_code()
         self.severity = severity
         self.category = category
-        self.timestamp = time.time()
+
+        # Timestamps (consistent across system)
+        self.created_at = time.time()
+        self.timestamp = self.created_at  # backwards compatibility
+        self.iso_timestamp = datetime.fromtimestamp(self.created_at, tz=timezone.utc).isoformat()
+
+        # Error code computed after timestamp exists
+        self.error_code = error_code or self._generate_error_code()
         
         # Context and causation
         self.component = component or (context.component if context else "unknown")
@@ -188,7 +195,9 @@ class GraphRAGException(Exception):
             "recoverable": self.recoverable,
             "performance_impact": self.performance_impact,
             "recovery_actions_count": len(self.recovery_actions),
-            "has_diagnostic_info": bool(self.diagnostic_info.system_state)
+            "has_diagnostic_info": bool(self.diagnostic_info.system_state),
+            "timestamp": self.timestamp,
+            "iso_timestamp": self.iso_timestamp,
         }
         
         if self.context.repository_name:
@@ -207,6 +216,7 @@ class GraphRAGException(Exception):
             "severity": self.severity,
             "category": self.category,
             "timestamp": self.timestamp,
+            "iso_timestamp": self.iso_timestamp,
             "recoverable": self.recoverable,
             "performance_impact": self.performance_impact,
             "context": {

@@ -79,11 +79,11 @@ function Bring-DownCompose {
   if (Test-Path $path) {
     try {
       if ($file -like "podman-*") {
-        Info ("Bringing down compose stack: {0}" -f $file)
+        Info ("Bringing down podman compose stack: {0}" -f $file)
         podman-compose -f $file down | Out-Null
       } else {
-        Info ("Bringing down docker compose stack: {0}" -f $file)
-        docker compose -f $file down | Out-Null
+        Info ("Bringing down podman compose stack: {0}" -f $file)
+        podman-compose -f $file down | Out-Null
       }
     } catch {
       Warn ("Compose down failed for {0}: {1}" -f $file, ($_.Exception.Message))

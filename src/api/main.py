@@ -1,13 +1,26 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+
+# Import core clients and lifespan managers
+from ..core.redis_client import create_redis_client, close_redis_client, get_redis_client
 
 # Routers
 from .routes import health as health_routes
 from .routes.migration_plan import router as migration_plan_router
 from .routes.chat import router as chat_router
+from .routes.index import router as index_router
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Initialize and connect to Redis
+    await create_redis_client()
+    yield
+    # Shutdown: Gracefully close Redis connection
+    await close_redis_client()
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Graf API", version="2.0.0")
+    app = FastAPI(title="Graf API", version="2.0.0", lifespan=lifespan)
 
     # CORS - permissive by default; tighten if needed via settings
     app.add_middleware(

@@ -113,9 +113,22 @@ function RealTimeIndexingProgress({ taskId, repositoryName, onComplete, onError 
 
   const connectWebSocket = () => {
     try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = window.location.host;
-      const wsUrl = `${protocol}//${host}/api/v1/index/status/${taskId}/stream`;
+      // Respect REACT_APP_API_URL for WebSocket connections, providing a robust fallback
+      // for various development and production environments.
+      const apiUrl = process.env.REACT_APP_API_URL;
+      let wsUrl;
+
+      if (apiUrl) {
+        // Base the WebSocket URL on the explicit API URL
+        const url = new URL(apiUrl);
+        const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${protocol}//${url.host}/api/v1/index/status/${taskId}/stream`;
+      } else {
+        // Fallback for standard local development (e.g., create-react-app proxy)
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host;
+        wsUrl = `${protocol}//${host}/api/v1/index/status/${taskId}/stream`;
+      }
       
       console.log('Connecting to WebSocket:', wsUrl);
       wsRef.current = new WebSocket(wsUrl);
@@ -200,21 +213,45 @@ function RealTimeIndexingProgress({ taskId, repositoryName, onComplete, onError 
     return `${rate.toFixed(1)}/s`;
   };
 
-  const renderConnectionStatus = () => (
-    <Box sx={{ mb: 2 }}>
-      <Chip
-        icon={connected ? <CheckCircle /> : <Error />}
-        label={connected ? 'Connected' : 'Disconnected'}
-        color={connected ? 'success' : 'error'}
-        size="small"
-      />
-      {connectionError && (
-        <Alert severity="warning" sx={{ mt: 1 }}>
-          Connection issue: {connectionError}
-        </Alert>
-      )}
-    </Box>
-  );
+  const renderConnectionStatus = () => {
+    let statusLabel = 'Disconnected';
+    let statusColor = 'error';
+    let statusIcon = <Error />;
+    let connectionMessage = null;
+
+    if (connected) {
+      statusLabel = 'Connected';
+      statusColor = 'success';
+      statusIcon = <CheckCircle />;
+    } else if (reconnectAttempts.current > 0) {
+      statusLabel = `Reconnecting (attempt ${reconnectAttempts.current})`;
+      statusColor = 'warning';
+      statusIcon = <CloudSync />;
+      connectionMessage = "Attempting to re-establish connection...";
+    }
+
+    return (
+      <Box sx={{ mb: 2 }}>
+        <Chip
+          icon={statusIcon}
+          label={statusLabel}
+          color={statusColor}
+          size="medium" // Make it slightly larger
+          sx={{ fontSize: '0.9rem', padding: '4px 8px' }} // Adjust padding/font size
+        />
+        {connectionMessage && (
+          <Alert severity="info" sx={{ mt: 1 }}>
+            {connectionMessage}
+          </Alert>
+        )}
+        {connectionError && (
+          <Alert severity="error" sx={{ mt: 1 }}>
+            Connection issue: {connectionError}
+          </Alert>
+        )}
+      </Box>
+    );
+  };
 
   const renderOverallProgress = () => {
     if (!status) return null;
@@ -460,37 +497,51 @@ function RealTimeIndexingProgress({ taskId, repositoryName, onComplete, onError 
           <List>
             {status.errors.map((error, index) => (
               <React.Fragment key={index}>
-                <ListItem>
-                  <ListItemIcon>
+                <ListItem alignItems="flex-start">
+                  <ListItemIcon sx={{ mt: 1 }}>
                     <Error color="error" />
                   </ListItemIcon>
                   <ListItemText
                     primary={
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <Typography>{error.error_type}</Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                        <Typography variant="subtitle1" color="error">
+                          {error.error_type}
+                        </Typography>
                         <Chip
                           size="small"
                           label={error.recoverable ? 'Recoverable' : 'Fatal'}
                           color={error.recoverable ? 'warning' : 'error'}
                         />
+                        <Typography variant="caption" color="text.secondary" sx={{ ml: 'auto' }}>
+                          {new Date(error.timestamp).toLocaleString()}
+                        </Typography>
                       </Box>
                     }
                     secondary={
-                      <Box>
-                        <Typography variant="body2">{error.error_message}</Typography>
+                      <Box sx={{ mt: 0.5 }}>
+                        <Typography variant="body2" color="text.primary" sx={{ mb: 0.5 }}>
+                          {error.error_message}
+                        </Typography>
                         {error.file_path && (
                           <Typography variant="body2" color="text.secondary">
-                            File: {error.file_path}
+                            <strong>File:</strong> {error.file_path}
                           </Typography>
                         )}
                         <Typography variant="body2" color="text.secondary">
-                          Stage: {STAGE_LABELS[error.stage]} • {new Date(error.timestamp).toLocaleString()}
+                          <strong>Stage:</strong> {STAGE_LABELS[error.stage]}
                         </Typography>
+                        {error.stack_trace && (
+                          <Box sx={{ mt: 1, bgcolor: 'error.light', p: 1, borderRadius: 1, overflowX: 'auto' }}>
+                            <Typography variant="caption" component="pre" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                              {error.stack_trace}
+                            </Typography>
+                          </Box>
+                        )}
                       </Box>
                     }
                   />
                 </ListItem>
-                {index < status.errors.length - 1 && <Divider />}
+                {index < status.errors.length - 1 && <Divider component="li" />}
               </React.Fragment>
             ))}
           </List>

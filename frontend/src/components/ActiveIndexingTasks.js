@@ -104,9 +104,11 @@ function ActiveIndexingTasks({ onViewProgress }) {
           Active Indexing Tasks ({activeTasks.length})
         </Typography>
         <Tooltip title="Refresh">
-          <IconButton onClick={fetchActiveTasks} disabled={loading}>
-            <Refresh />
-          </IconButton>
+          <span>
+            <IconButton onClick={fetchActiveTasks} disabled={loading}>
+              <Refresh />
+            </IconButton>
+          </span>
         </Tooltip>
       </Box>
 

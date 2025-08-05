@@ -186,7 +186,7 @@ async def basic_health_check():
 @router.get("/api/v1/health/ready")  # compatibility alias when router not mounted with prefix
 @router.get("/api/health/ready")     # compatibility alias
 @router.get("/health/ready")         # compatibility alias
-@handle_api_errors
+# Intentionally not wrapping in handle_api_errors so we always return HTTP 200 with structured JSON
 async def readiness_check(request: Request):
     """
     Enhanced readiness check endpoint with comprehensive validation.
@@ -298,7 +298,7 @@ async def readiness_check(request: Request):
             except asyncio.TimeoutError:
                 self_heal_info = {"errors": ["self_heal_timeout"]}
 
-        # If still not ready, return immediate, with explicit reasons
+        # If still not ready, return immediate, with explicit reasons (HTTP 200)
         if not (bool(getattr(request.app.state, "is_ready", False)) or inferred_ready):
             return {
                 "status": "not_ready",
@@ -322,27 +322,25 @@ async def readiness_check(request: Request):
                 }
             }
         
-        # Check if there was an initialization error
+        # Check if there was an initialization error; report as not_ready with details (HTTP 200)
         if hasattr(request.app.state, 'initialization_error') and request.app.state.initialization_error:
             error_msg = request.app.state.initialization_error
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "status": "initialization_failed",
-                    "error": error_msg,
-                    "timestamp": time.time(),
-                    "troubleshooting": {
-                        "suggestion": "Fix initialization error and restart the application",
-                        "check_config": "Verify environment variables and configuration files",
-                        "common_fixes": [
-                            "Check database connection strings",
-                            "Verify AWS credentials for Bedrock",
-                            "Ensure required services are running",
-                            "Check file permissions and paths"
-                        ]
-                    }
+            return {
+                "status": "not_ready",
+                "message": "Initialization failed",
+                "error": error_msg,
+                "timestamp": time.time(),
+                "troubleshooting": {
+                    "suggestion": "Fix initialization error and restart the application",
+                    "check_config": "Verify environment variables and configuration files",
+                    "common_fixes": [
+                        "Check database connection strings",
+                        "Verify AWS credentials for Bedrock",
+                        "Ensure required services are running",
+                        "Check file permissions and paths"
+                    ]
                 }
-            )
+            }
         
         # Get clients from app state with timeout handling
         timeout_seconds = 10.0
@@ -354,23 +352,20 @@ async def readiness_check(request: Request):
                 timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "status": "timeout",
-                    "error": f"Client validation timed out after {timeout_seconds} seconds",
-                    "timestamp": time.time(),
-                    "troubleshooting": {
-                        "suggestion": "Check if services are responding slowly",
-                        "check_resources": "Monitor CPU and memory usage",
-                        "possible_causes": [
-                            "Database connections are slow",
-                            "High system load",
-                            "Network connectivity issues"
-                        ]
-                    }
+            return {
+                "status": "not_ready",
+                "message": f"Client validation timed out after {timeout_seconds} seconds",
+                "timestamp": time.time(),
+                "troubleshooting": {
+                    "suggestion": "Check if services are responding slowly",
+                    "check_resources": "Monitor CPU and memory usage",
+                    "possible_causes": [
+                        "Database connections are slow",
+                        "High system load",
+                        "Network connectivity issues"
+                    ]
                 }
-            )
+            }
         
         chroma_client = clients_check["chroma_client"]
         neo4j_client = clients_check["neo4j_client"]
