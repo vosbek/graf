@@ -333,14 +333,14 @@ class StatusUpdateManager:
     
     async def broadcast_status_update(self, task_id: str, status: Dict[str, Any]) -> None:
         """Broadcast status update to all connected WebSocket clients."""
+        message = {
+            "type": "task_status",
+            "task_id": task_id,
+            "data": status
+        }
+        
+        # Broadcast to task-specific WebSocket connections
         if task_id in active_websockets:
-            message = {
-                "type": "status_update",
-                "task_id": task_id,
-                "data": status
-            }
-            
-            # Remove disconnected clients
             connected_clients = []
             for websocket in active_websockets[task_id]:
                 try:
@@ -353,6 +353,21 @@ class StatusUpdateManager:
             active_websockets[task_id] = connected_clients
             if not connected_clients:
                 del active_websockets[task_id]
+        
+        # Broadcast to live status WebSocket connections (subscribed to this task)
+        if task_id in subscribed_tasks:
+            connected_subscribers = []
+            for websocket in subscribed_tasks[task_id]:
+                try:
+                    await websocket.send_text(json.dumps(message, default=str))
+                    connected_subscribers.append(websocket)
+                except:
+                    # Client disconnected, skip
+                    pass
+            
+            subscribed_tasks[task_id] = connected_subscribers
+            if not connected_subscribers:
+                del subscribed_tasks[task_id]
 
 
 @router.post("/repository", response_model=IndexingStatusResponse)
@@ -903,6 +918,129 @@ async def stream_indexing_status(websocket: WebSocket, task_id: str, redis_clien
                     del active_websockets[task_id]
             except ValueError:
                 pass
+
+
+# Global WebSocket connections for live status updates
+live_status_websockets: List[WebSocket] = []
+subscribed_tasks: Dict[str, List[WebSocket]] = {}
+
+
+@router.websocket("/live-status")
+async def live_status_stream(websocket: WebSocket, redis_client: RedisClient = Depends(get_redis_client)):
+    """
+    WebSocket endpoint for pre-connected live status updates.
+    
+    This endpoint allows clients to connect before starting any indexing tasks
+    and receive real-time updates for all tasks they subscribe to.
+    """
+    await websocket.accept()
+    live_status_websockets.append(websocket)
+    
+    try:
+        # Send connection confirmation
+        welcome_message = {
+            "type": "connection_info",
+            "message": "Connected to live status stream",
+            "timestamp": datetime.now().isoformat(),
+            "supported_commands": ["subscribe_task", "unsubscribe_task", "ping"]
+        }
+        await websocket.send_text(json.dumps(welcome_message))
+        
+        # Keep connection alive and handle client messages
+        while True:
+            try:
+                # Wait for client messages with a reasonable timeout
+                message = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                
+                try:
+                    client_data = json.loads(message)
+                    message_type = client_data.get("type")
+                    
+                    if message_type == "subscribe_task":
+                        task_id = client_data.get("task_id")
+                        if task_id:
+                            # Add to subscribed tasks
+                            if task_id not in subscribed_tasks:
+                                subscribed_tasks[task_id] = []
+                            subscribed_tasks[task_id].append(websocket)
+                            
+                            # Send current status if task exists
+                            status_data = await redis_client.get_task_status(task_id)
+                            if status_data:
+                                status_message = {
+                                    "type": "task_status",
+                                    "task_id": task_id,
+                                    "data": status_data
+                                }
+                                await websocket.send_text(json.dumps(status_message, default=str))
+                            else:
+                                error_message = {
+                                    "type": "task_not_found",
+                                    "task_id": task_id,
+                                    "message": f"Task {task_id} not found"
+                                }
+                                await websocket.send_text(json.dumps(error_message))
+                    
+                    elif message_type == "unsubscribe_task":
+                        task_id = client_data.get("task_id")
+                        if task_id and task_id in subscribed_tasks:
+                            try:
+                                subscribed_tasks[task_id].remove(websocket)
+                                if not subscribed_tasks[task_id]:
+                                    del subscribed_tasks[task_id]
+                            except ValueError:
+                                pass
+                    
+                    elif message_type == "ping":
+                        pong_message = {
+                            "type": "pong", 
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        await websocket.send_text(json.dumps(pong_message))
+                    
+                except json.JSONDecodeError:
+                    error_message = {
+                        "type": "error",
+                        "message": "Invalid JSON format"
+                    }
+                    await websocket.send_text(json.dumps(error_message))
+                    
+            except asyncio.TimeoutError:
+                # Send periodic heartbeat to keep connection alive
+                heartbeat = {
+                    "type": "heartbeat",
+                    "timestamp": datetime.now().isoformat(),
+                    "active_subscriptions": len([task_id for task_id, clients in subscribed_tasks.items() if websocket in clients])
+                }
+                try:
+                    await websocket.send_text(json.dumps(heartbeat))
+                except WebSocketDisconnect:
+                    break
+                except Exception:
+                    break
+                
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            error_message = {
+                "type": "error",
+                "message": f"WebSocket error: {str(e)}"
+            }
+            await websocket.send_text(json.dumps(error_message))
+        except:
+            pass
+    finally:
+        # Clean up connections
+        if websocket in live_status_websockets:
+            live_status_websockets.remove(websocket)
+        
+        # Remove from all task subscriptions
+        for task_id, clients in list(subscribed_tasks.items()):
+            if websocket in clients:
+                clients.remove(websocket)
+                if not clients:
+                    del subscribed_tasks[task_id]
 
 
 @router.get("/status/{task_id}/logs")

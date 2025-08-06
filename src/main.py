@@ -128,13 +128,13 @@ async def initialize_clients_async(app: FastAPI):
             def _import_and_create_chromadb():
                 # Import our v2-native client
                 from src.core.chromadb_client import ChromaDBClient as V2ChromaDBClient
-                # Optional tenant via env CHROMA_TENANT; None means global v2 endpoints
-                tenant = os.getenv("CHROMA_TENANT", "").strip() or None
+                # Use settings for v2 tenant/database configuration
                 return V2ChromaDBClient(
                     host=settings.chroma_host,
                     port=settings.chroma_port,
                     collection_name=settings.chroma_collection_name,
-                    tenant=tenant,
+                    tenant=settings.chroma_tenant,
+                    database=settings.chroma_database,
                 )
             # Run ChromaDB import/creation in thread pool to avoid blocking event loop
             chroma_client = await asyncio.to_thread(_import_and_create_chromadb)
@@ -253,7 +253,8 @@ async def initialize_clients_async(app: FastAPI):
                 neo4j_client=neo4j_client,
                 max_concurrent_repos=3,  # Conservative for stability
                 workspace_dir="./data/repositories",
-                use_codebert=(embedding_client is not None)
+                use_codebert=(embedding_client is not None),
+                embedding_client=embedding_client
             )
         else:
             repository_processor = None
@@ -331,7 +332,8 @@ async def initialize_clients_async(app: FastAPI):
                         neo4j_client=neo4j_client,
                         max_concurrent_repos=2,
                         workspace_dir="./data/repositories",
-                        use_codebert=bool(embedding_client)
+                        use_codebert=bool(embedding_client),
+                        embedding_client=embedding_client
                     )
                     app.state.repository_processor = repository_processor
                 except Exception as pe:

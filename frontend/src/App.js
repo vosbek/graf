@@ -17,6 +17,7 @@ import RepositoryBrowser from './components/RepositoryBrowser';
 import DependencyGraph from './components/DependencyGraph';
 import MigrationPlanner from './components/MigrationPlanner';
 import RepositoryIndexer from './components/RepositoryIndexer';
+import EnhancedIngestionInterface from './components/EnhancedIngestionInterface';
 import CrossRepositoryAnalysis from './components/CrossRepositoryAnalysis';
 // Replace legacy SystemStatusDashboard import with SystemHealthOverview page if the former doesn't exist
 // If SystemStatusDashboard exists elsewhere, adjust the import accordingly.
@@ -37,7 +38,7 @@ const drawerWidth = 240;
 // Navigation items
 const navigationItems = [
   { text: 'Dashboard', icon: <Dashboard />, path: '/', component: 'Dashboard' },
-  { text: 'Index Repositories', icon: <FolderOpen />, path: '/index', component: 'RepositoryIndexer' },
+  { text: 'Index Repositories', icon: <FolderOpen />, path: '/index', component: 'EnhancedIngestionInterface' },
   { text: 'Search Code', icon: <Search />, path: '/search', component: 'SearchInterface' },
   { text: 'AI Chat', icon: <Chat />, path: '/chat', component: 'ChatInterface' },
   { text: 'Repository Browser', icon: <Code />, path: '/browse', component: 'RepositoryBrowser' },
@@ -134,7 +135,7 @@ function AppContent() {
           <DashboardComponent {...commonProps} />
         </RouteRenderer>
         <RouteRenderer path="/index">
-          <RepositoryIndexer {...commonProps} />
+          <EnhancedIngestionInterface {...commonProps} />
         </RouteRenderer>
         <RouteRenderer path="/search">
           <SearchInterface {...commonProps} />

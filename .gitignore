@@ -112,8 +112,6 @@ C:/temp/test-local-repo*/
 "C:*temp*test-local-repo*"
 
 # Development compose files
-docker-compose.dev.yml
-podman-compose*.yml
 
 # OpenAPI generated files (if auto-generated)
 # openapi.json

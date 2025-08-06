@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 
@@ -11,6 +11,47 @@ logger = logging.getLogger(__name__)
 
 class ChromaV2Error(Exception):
     pass
+
+
+class CompatibilityClient:
+    """Compatibility wrapper for old health check code that expects .client attribute."""
+    
+    def __init__(self, parent_client):
+        self.parent = parent_client
+    
+    def list_collections(self):
+        """Synchronous wrapper for list_collections - used by health check."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're in an async context, but the health check calls this synchronously
+                # Create a new thread to handle the async call
+                import threading
+                result = None
+                exception = None
+                
+                def run_async():
+                    nonlocal result, exception
+                    try:
+                        new_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(new_loop)
+                        result = new_loop.run_until_complete(self.parent.list_collections())
+                        new_loop.close()
+                    except Exception as e:
+                        exception = e
+                
+                thread = threading.Thread(target=run_async)
+                thread.start()
+                thread.join(timeout=10)  # 10 second timeout
+                
+                if exception:
+                    raise exception
+                return result or []
+            else:
+                return loop.run_until_complete(self.parent.list_collections())
+        except Exception:
+            return []
 
 
 class ChromaDBClient:
@@ -34,8 +75,13 @@ class ChromaDBClient:
         self.base_url = f"http://{self.host}:{self.port}"
         self.collection_name = collection_name
         # Allow CHROMA_TENANT env to override if provided
-        self.tenant = tenant or os.getenv("CHROMA_TENANT", "").strip() or "default_tenant"
-        self.database = database or os.getenv("CHROMA_DATABASE", "").strip() or "default_database"
+        tenant_env = os.getenv("CHROMA_TENANT", "").strip()
+        database_env = os.getenv("CHROMA_DATABASE", "").strip()
+        
+        # Support both v1 (no tenant) and v2 (with tenant) modes
+        self.tenant = tenant or tenant_env or None
+        self.database = database or database_env or None
+        self.use_v1_mode = self.tenant is None
         self._session = session
         self._owns_session = session is None
         self._timeout = aiohttp.ClientTimeout(total=request_timeout)
@@ -43,26 +89,34 @@ class ChromaDBClient:
             "Content-Type": "application/json",
             # If auth headers or tokens are needed, inject here from env/config
         }
+        
+        # Compatibility property for old health check code
+        self.client = CompatibilityClient(self)
 
     async def initialize(self) -> None:
-        """Create an internal session and verify server health /api/v2/healthcheck."""
+        """Create an internal session and verify server health."""
         if self._session is None:
             self._session = aiohttp.ClientSession(timeout=self._timeout)
 
-        logger.info(f"Initializing ChromaDB v2 client: {self.base_url} (tenant: {self.tenant}, database: {self.database})")
+        mode = "v1 (standalone)" if self.use_v1_mode else f"v2 (tenant: {self.tenant}, database: {self.database})"
+        logger.info(f"Initializing ChromaDB client: {self.base_url} - {mode}")
 
-        ok = await self._healthcheck_v2()
-        if not ok:
-            logger.error(f"ChromaDB v2 healthcheck failed: {self.base_url}/api/v2/healthcheck")
-            raise ChromaV2Error("Chroma v2 healthcheck failed")
+        # Use appropriate healthcheck for the mode
+        if self.use_v1_mode:
+            ok = await self._healthcheck_v1()
+            if not ok:
+                logger.error(f"ChromaDB v1 healthcheck failed")
+                raise ChromaV2Error("ChromaDB v1 healthcheck failed")
+        else:
+            ok = await self._healthcheck_v2()
+            if not ok:
+                logger.error(f"ChromaDB v2 healthcheck failed")
+                raise ChromaV2Error("ChromaDB v2 healthcheck failed")
+            # Only ensure tenant/database in v2 mode
+            await self._ensure_tenant()
+            await self._ensure_database()
         
-        # Ensure tenant exists
-        await self._ensure_tenant()
-        
-        # Ensure database exists
-        await self._ensure_database()
-        
-        logger.info(f"ChromaDB v2 healthcheck passed and tenant/database ensured (tenant: {self.tenant}, database: {self.database})")
+        logger.info(f"ChromaDB healthcheck passed - using {mode}")
 
     async def close(self) -> None:
         """Close session if owned."""
@@ -113,30 +167,44 @@ class ChromaDBClient:
         if not name:
             raise ValueError("get_collection requires a collection name")
 
-        # Try query by name via v2 endpoint
-        # Not all Chroma v2 deployments have a direct `GET ?name=` filter; when missing, list-and-filter
-        # We do both strategies: try filter endpoint first; if 405/404, fallback to list and search.
-        url = self._v2_url("collections")
-        params = {"name": name}
-        result = await self._get_json(url, params=params, allow_405=True, allow_404=True)
-        if isinstance(result, dict) and result.get("name") == name:
-            return result
-        if isinstance(result, dict) and "collections" in result:
-            # Some servers return {"collections":[...]}
-            colls = result.get("collections") or []
-            for c in colls:
-                if c.get("name") == name:
-                    return c
+        if self.use_v1_mode:
+            # For v1 API, try to get collection directly by name in path
+            url = f"{self._get_collections_url()}/{name}"
+            result = await self._get_json(url, allow_404=True)
+            if isinstance(result, dict) and result.get("name") == name:
+                return result
+            
+            # If direct access fails, fall back to listing all and filtering
+            url = self._get_collections_url()
+            result = await self._get_json(url, allow_404=True)
+            if isinstance(result, list):
+                for c in result:
+                    if isinstance(c, dict) and c.get("name") == name:
+                        return c
+            return None
+        else:
+            # v2 mode logic (original)
+            url = self._v2_url("collections")
+            params = {"name": name}
+            result = await self._get_json(url, params=params, allow_405=True, allow_404=True)
+            if isinstance(result, dict) and result.get("name") == name:
+                return result
+            if isinstance(result, dict) and "collections" in result:
+                # Some servers return {"collections":[...]}
+                colls = result.get("collections") or []
+                for c in colls:
+                    if c.get("name") == name:
+                        return c
 
-        # Fallback: list all and filter client-side
-        result = await self._get_json(url, allow_404=True)
-        if isinstance(result, dict) and "collections" in result:
-            colls = result.get("collections") or []
-            for c in colls:
-                if c.get("name") == name:
-                    return c
+            # Fallback: list all and filter client-side
+            result = await self._get_json(url, allow_404=True)
+            if isinstance(result, dict) and "collections" in result:
+                colls = result.get("collections") or []
+                for c in colls:
+                    if c.get("name") == name:
+                        return c
 
-        return None
+            return None
 
     async def create_collection(self, name: Optional[str], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Create a collection via v2. Returns created collection info."""
@@ -157,37 +225,56 @@ class ChromaDBClient:
                 return result["collection"]
         raise ChromaV2Error(f"Unexpected create_collection response: {result}")
 
+    async def list_collections(self) -> List[Dict[str, Any]]:
+        """List all collections. Returns list of collection info dicts."""
+        url = self._v2_url("collections")
+        result = await self._get_json(url)
+        
+        if isinstance(result, list):
+            return result
+        elif isinstance(result, dict) and "collections" in result:
+            return result.get("collections", [])
+        else:
+            logger.warning(f"Unexpected list_collections response: {result}")
+            return []
+
     async def health_check(self) -> Dict[str, Any]:
-        """Return v2 health result with tenant/database/collection readiness."""
+        """Return health result with collection readiness."""
         health: Dict[str, Any] = {
             "status": "healthy",
             "timestamp": __import__("time").time(),
             "checks": {}
         }
         try:
-            # 1) Base v2 healthcheck
-            ok = await self._healthcheck_v2()
-            health["checks"]["v2_healthcheck"] = {"status": "pass" if ok else "fail"}
+            # 1) Base healthcheck (use appropriate version)
+            if self.use_v1_mode:
+                ok = await self._healthcheck_v1()
+                health["checks"]["v1_healthcheck"] = {"status": "pass" if ok else "fail"}
+            else:
+                ok = await self._healthcheck_v2()
+                health["checks"]["v2_healthcheck"] = {"status": "pass" if ok else "fail"}
+            
             if not ok:
                 health["status"] = "unhealthy"
 
-            # 2) Tenant readiness
-            try:
-                tenant_url = f"{self.base_url}/api/v2/tenants/{self.tenant}"
-                _ = await self._get_json(tenant_url)
-                health["checks"]["tenant"] = {"status": "pass", "tenant": self.tenant}
-            except Exception as te:
-                health["checks"]["tenant"] = {"status": "fail", "tenant": self.tenant, "error": str(te)}
-                health["status"] = "unhealthy"
+            # 2) Tenant readiness (v2 only)
+            if not self.use_v1_mode:
+                try:
+                    tenant_url = f"{self.base_url}/api/v2/tenants/{self.tenant}"
+                    _ = await self._get_json(tenant_url)
+                    health["checks"]["tenant"] = {"status": "pass", "tenant": self.tenant}
+                except Exception as te:
+                    health["checks"]["tenant"] = {"status": "fail", "tenant": self.tenant, "error": str(te)}
+                    health["status"] = "unhealthy"
 
-            # 3) Database readiness
-            try:
-                db_url = f"{self.base_url}/api/v2/tenants/{self.tenant}/databases/{self.database}"
-                _ = await self._get_json(db_url)
-                health["checks"]["database"] = {"status": "pass", "database": self.database}
-            except Exception as de:
-                health["checks"]["database"] = {"status": "fail", "database": self.database, "error": str(de)}
-                health["status"] = "unhealthy"
+                # 3) Database readiness (v2 only)
+                try:
+                    db_url = f"{self.base_url}/api/v2/tenants/{self.tenant}/databases/{self.database}"
+                    _ = await self._get_json(db_url)
+                    health["checks"]["database"] = {"status": "pass", "database": self.database}
+                except Exception as de:
+                    health["checks"]["database"] = {"status": "fail", "database": self.database, "error": str(de)}
+                    health["status"] = "unhealthy"
 
             # 4) Collection readiness (optional)
             if self.collection_name:
@@ -220,6 +307,121 @@ class ChromaDBClient:
             logger.error(f"Chroma health_check failed: {e}")
         return health
 
+    async def add_chunks(self, chunks, collection_name: Optional[str] = None) -> bool:
+        """
+        Add chunks to ChromaDB collection.
+        Expected chunks format: list of EnhancedChunk objects or similar with 
+        attributes: id, content, metadata, embeddings
+        """
+        try:
+            collection_name = collection_name or self.collection_name
+            if not collection_name:
+                logger.error("No collection name provided for add_chunks")
+                return False
+                
+            # Ensure collection exists
+            await self.get_or_create_collection(collection_name)
+            
+            # Prepare data for ChromaDB
+            ids = []
+            documents = []
+            metadatas = []
+            embeddings = []
+            
+            for chunk in chunks:
+                # Handle both EnhancedChunk and direct CodeChunk objects
+                if hasattr(chunk, 'chunk'):
+                    # EnhancedChunk - extract data from nested chunk
+                    code_chunk = chunk.chunk
+                    ids.append(code_chunk.id)
+                    documents.append(code_chunk.content)
+                    
+                    # Build metadata from both EnhancedChunk and CodeChunk
+                    metadata = {}
+                    if hasattr(code_chunk, 'language'):
+                        metadata['language'] = str(code_chunk.language)
+                    if hasattr(code_chunk, 'chunk_type'):
+                        metadata['chunk_type'] = code_chunk.chunk_type
+                    if hasattr(code_chunk, 'name') and code_chunk.name:
+                        metadata['name'] = code_chunk.name
+                    if hasattr(code_chunk, 'start_line'):
+                        metadata['start_line'] = code_chunk.start_line
+                    if hasattr(code_chunk, 'end_line'):
+                        metadata['end_line'] = code_chunk.end_line
+                    
+                    # Add EnhancedChunk metadata
+                    if hasattr(chunk, 'business_domain') and chunk.business_domain:
+                        metadata['business_domain'] = chunk.business_domain
+                    if hasattr(chunk, 'importance_score'):
+                        metadata['importance_score'] = chunk.importance_score
+                    
+                    metadatas.append(metadata)
+                    
+                    # Handle embeddings from EnhancedChunk
+                    if hasattr(chunk, 'embeddings') and chunk.embeddings:
+                        embeddings.append(chunk.embeddings)
+                    elif hasattr(chunk, 'embedding') and chunk.embedding:
+                        embeddings.append(chunk.embedding)
+                    elif hasattr(code_chunk, 'embeddings') and code_chunk.embeddings:
+                        embeddings.append(code_chunk.embeddings)
+                    elif hasattr(code_chunk, 'embedding') and code_chunk.embedding:
+                        embeddings.append(code_chunk.embedding)
+                else:
+                    # Direct CodeChunk or other chunk format
+                    ids.append(getattr(chunk, 'id', str(hash(chunk))))
+                    documents.append(getattr(chunk, 'content', str(chunk)))
+                    
+                    # Handle metadata
+                    metadata = getattr(chunk, 'metadata', {})
+                    if hasattr(chunk, 'file_path'):
+                        metadata['file_path'] = str(chunk.file_path)
+                    if hasattr(chunk, 'language'):
+                        metadata['language'] = str(chunk.language)
+                    if hasattr(chunk, 'chunk_type'):
+                        metadata['chunk_type'] = chunk.chunk_type
+                    metadatas.append(metadata)
+                    
+                    # Handle embeddings if available
+                    if hasattr(chunk, 'embeddings') and chunk.embeddings:
+                        embeddings.append(chunk.embeddings)
+                    elif hasattr(chunk, 'embedding') and chunk.embedding:
+                        embeddings.append(chunk.embedding)
+            
+            # Get collection info to get the ID
+            collection_info = await self.get_or_create_collection(collection_name)
+            collection_id = collection_info.get('id')
+            if not collection_id:
+                logger.error(f"Could not get collection ID for {collection_name}")
+                return False
+            
+            # Add to ChromaDB collection using collection ID
+            url = f"{self._get_collections_url()}/{collection_id}/add"
+            payload = {
+                "documents": documents,
+                "metadatas": metadatas,
+                "ids": ids
+            }
+            
+            # Only include embeddings if we have them
+            if embeddings and len(embeddings) == len(documents):
+                payload["embeddings"] = embeddings
+            
+            await self._post_json(url, payload)
+            logger.info(f"Successfully added {len(chunks)} chunks to collection {collection_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to add chunks to ChromaDB: {e}")
+            logger.error(f"Chunks count: {len(chunks)}")
+            logger.error(f"Collection name: {collection_name}")
+            if chunks:
+                sample_chunk = chunks[0]
+                logger.error(f"Sample chunk type: {type(sample_chunk)}")
+                logger.error(f"Sample chunk attributes: {[attr for attr in dir(sample_chunk) if not attr.startswith('_')]}")
+                if hasattr(sample_chunk, 'chunk'):
+                    logger.error(f"Nested chunk attributes: {[attr for attr in dir(sample_chunk.chunk) if not attr.startswith('_')]}")
+            return False
+
     async def get_statistics(self) -> Dict[str, Any]:
         """Basic stats placeholder; extend if your server exposes more."""
         stats: Dict[str, Any] = {}
@@ -236,19 +438,32 @@ class ChromaDBClient:
 
     # --------- Internals ---------
 
-    def _v2_url(self, resource: str) -> str:
-        """
-        Build a v2 endpoint using the tenant/database/resource structure.
-        Example: /api/v2/tenants/{tenant}/databases/{database}/collections
-        """
-        if resource == "collections":
-            url = f"{self.base_url}/api/v2/tenants/{self.tenant}/databases/{self.database}/collections"
-            logger.debug(f"Building collections URL: {url} (tenant: {self.tenant}, database: {self.database})")
+    def _get_collections_url(self) -> str:
+        """Get the correct collections URL based on API mode."""
+        if self.use_v1_mode:
+            # Use v1 collections endpoint
+            url = f"{self.base_url}/api/v1/collections"
+            logger.debug(f"Building v1 collections URL: {url}")
             return url
         else:
-            # For other resources like healthcheck, use the base v2 path
-            url = f"{self.base_url}/api/v2/{resource}"
-            logger.debug(f"Building base v2 URL: {url} (resource: {resource})")
+            url = f"{self.base_url}/api/v2/tenants/{self.tenant}/databases/{self.database}/collections"
+            logger.debug(f"Building v2 tenant collections URL: {url} (tenant: {self.tenant}, database: {self.database})")
+            return url
+
+    def _v2_url(self, resource: str) -> str:
+        """
+        Build an endpoint using the appropriate API version structure.
+        """
+        if resource == "collections":
+            return self._get_collections_url()
+        else:
+            # For other resources like healthcheck, use the appropriate API version
+            if self.use_v1_mode:
+                url = f"{self.base_url}/api/v1/{resource}"
+                logger.debug(f"Building v1 URL: {url} (resource: {resource})")
+            else:
+                url = f"{self.base_url}/api/v2/{resource}"
+                logger.debug(f"Building v2 URL: {url} (resource: {resource})")
             return url
 
     async def _healthcheck_v2(self) -> bool:
@@ -257,6 +472,15 @@ class ChromaDBClient:
             result = await self._get_json(url)
             # Many servers return {"status":"ok"}; accept any 200 JSON as OK.
             return isinstance(result, dict)
+        except Exception:
+            return False
+    
+    async def _healthcheck_v1(self) -> bool:
+        url = f"{self.base_url}/api/v1/heartbeat"
+        try:
+            result = await self._get_json(url)
+            # v1 heartbeat returns {"nanosecond heartbeat": timestamp}
+            return isinstance(result, dict) and "nanosecond heartbeat" in result
         except Exception:
             return False
 

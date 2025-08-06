@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Repository Indexer - Always-Connected Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        .header {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .connected {
+            background-color: #e8f5e8;
+            color: #2e7d32;
+        }
+        
+        .disconnected {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        
+        .connecting {
+            background-color: #fff3e0;
+            color: #ef6c00;
+        }
+        
+        .form-group {
+            margin-bottom: 16px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .form-control {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+        
+        .form-control:focus {
+            outline: none;
+            border-color: #1976d2;
+        }
+        
+        .btn {
+            background-color: #1976d2;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            width: 100%;
+        }
+        
+        .btn:hover:not(:disabled) {
+            background-color: #1565c0;
+        }
+        
+        .btn:disabled {
+            background-color: #bdbdbd;
+            cursor: not-allowed;
+        }
+        
+        .mode-selector {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        
+        .mode-btn {
+            padding: 8px 16px;
+            border: 2px solid #e0e0e0;
+            background: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        
+        .mode-btn.active {
+            border-color: #1976d2;
+            background-color: #e3f2fd;
+            color: #1976d2;
+        }
+        
+        .progress-section {
+            padding: 20px 0;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background-color: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 12px 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background-color: #4caf50;
+            transition: width 0.3s ease;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            text-transform: uppercase;
+        }
+        
+        .status-completed { background: #e8f5e8; color: #2e7d32; }
+        .status-in_progress { background: #e3f2fd; color: #1976d2; }
+        .status-failed { background: #ffebee; color: #c62828; }
+        .status-queued { background: #fff3e0; color: #ef6c00; }
+        
+        .log-section {
+            max-height: 300px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            border-radius: 6px;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        
+        .log-entry {
+            margin: 4px 0;
+            display: flex;
+            gap: 8px;
+        }
+        
+        .log-time {
+            color: #666;
+            min-width: 80px;
+        }
+        
+        .log-message {
+            flex: 1;
+        }
+        
+        .alert {
+            padding: 12px;
+            border-radius: 6px;
+            margin: 12px 0;
+        }
+        
+        .alert-success {
+            background: #e8f5e8;
+            color: #2e7d32;
+            border: 1px solid #c8e6c9;
+        }
+        
+        .alert-error {
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+        }
+        
+        .no-task {
+            text-align: center;
+            color: #666;
+            padding: 40px 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1 style="margin: 0; color: #333;">Repository Indexer</h1>
+            <p style="margin: 8px 0 0 0; color: #666;">Always-connected real-time indexing</p>
+        </div>
+        <div id="connection-status" class="connection-status connecting">
+            <span id="connection-indicator">●</span>
+            <span id="connection-text">Connecting...</span>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Repository Form -->
+        <div class="card">
+            <h3 style="margin-top: 0;">Repository Details</h3>
+            
+            <div class="mode-selector">
+                <button class="mode-btn active" data-mode="local">📁 Local Path</button>
+                <button class="mode-btn" data-mode="remote">🔗 Git URL</button>
+            </div>
+            
+            <div class="form-group">
+                <label for="repo-path">Repository Path/URL</label>
+                <input type="text" id="repo-path" class="form-control" 
+                       placeholder="C:\path\to\repository" />
+            </div>
+            
+            <div class="form-group">
+                <label for="repo-name">Repository Name</label>
+                <input type="text" id="repo-name" class="form-control" 
+                       placeholder="my-project" />
+            </div>
+            
+            <button id="index-btn" class="btn">
+                <span id="btn-text">Index Repository</span>
+            </button>
+            
+            <div id="messages"></div>
+        </div>
+
+        <!-- Real-time Progress -->
+        <div class="card">
+            <h3 style="margin-top: 0;">Indexing Progress</h3>
+            
+            <div id="no-task" class="no-task">
+                <div style="font-size: 48px; margin-bottom: 16px;">📦</div>
+                <div>No active indexing task</div>
+                <div style="font-size: 14px; color: #999; margin-top: 8px;">
+                    Start indexing a repository to see real-time progress
+                </div>
+            </div>
+            
+            <div id="progress-content" style="display: none;">
+                <div style="margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <h4 id="task-name" style="margin: 0;"></h4>
+                        <span id="task-status" class="status-badge"></span>
+                    </div>
+                    <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                        Task ID: <span id="task-id"></span>
+                    </div>
+                </div>
+                
+                <div class="progress-section">
+                    <div style="margin-bottom: 8px;">
+                        <span id="progress-text">Processing...</span>
+                        <span id="progress-percent" style="float: right; font-weight: bold;"></span>
+                    </div>
+                    <div class="progress-bar">
+                        <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0;">
+                    <div>
+                        <div style="font-size: 12px; color: #666;">Files Processed</div>
+                        <div id="files-count" style="font-size: 18px; font-weight: bold;">0</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 12px; color: #666;">Chunks Generated</div>
+                        <div id="chunks-count" style="font-size: 18px; font-weight: bold;">0</div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 16px;">
+                    <div style="font-size: 12px; color: #666; margin-bottom: 8px;">Current Stage</div>
+                    <div id="current-stage" style="font-weight: 500;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Live Updates Log -->
+    <div class="card" style="margin-top: 20px;">
+        <h3 style="margin-top: 0;">Live Updates Log</h3>
+        <div id="log-section" class="log-section">
+            <div class="log-entry">
+                <span class="log-time">--:--:--</span>
+                <span class="log-message">Waiting for WebSocket connection...</span>
+            </div>
+        </div>
+        <button onclick="clearLog()" style="margin-top: 12px; padding: 6px 12px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">
+            Clear Log
+        </button>
+    </div>
+
+    <script>
+        // WebSocket connection
+        let ws = null;
+        let currentTask = null;
+        let indexMode = 'local';
+        let indexing = false;
+
+        // DOM elements
+        const connectionStatus = document.getElementById('connection-status');
+        const connectionText = document.getElementById('connection-text');
+        const connectionIndicator = document.getElementById('connection-indicator');
+        const repoPath = document.getElementById('repo-path');
+        const repoName = document.getElementById('repo-name');
+        const indexBtn = document.getElementById('index-btn');
+        const btnText = document.getElementById('btn-text');
+        const messages = document.getElementById('messages');
+        const noTask = document.getElementById('no-task');
+        const progressContent = document.getElementById('progress-content');
+        const logSection = document.getElementById('log-section');
+
+        // Initialize WebSocket connection
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/api/v1/index/live-status`;
+            
+            addLog('Connecting to WebSocket...', 'info');
+            
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                updateConnectionStatus('connected', 'Real-time updates connected');
+                addLog('WebSocket connected successfully', 'success');
+            };
+
+            ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                handleWebSocketMessage(message);
+            };
+
+            ws.onclose = () => {
+                updateConnectionStatus('disconnected', 'Connection lost - reconnecting...');
+                addLog('WebSocket disconnected - attempting to reconnect...', 'warning');
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = (error) => {
+                updateConnectionStatus('disconnected', 'Connection error');
+                addLog('WebSocket error occurred', 'error');
+            };
+        }
+
+        function updateConnectionStatus(status, text) {
+            connectionStatus.className = `connection-status ${status}`;
+            connectionText.textContent = text;
+        }
+
+        function handleWebSocketMessage(message) {
+            switch (message.type) {
+                case 'connection_info':
+                    addLog(`Connected: ${message.message}`, 'info');
+                    break;
+                
+                case 'task_status':
+                    if (currentTask && message.task_id === currentTask.taskId) {
+                        updateProgressDisplay(message.data);
+                        addLog(`Task update: ${message.data.status} - ${message.data.current_stage}`, 'info');
+                    }
+                    break;
+                
+                case 'task_not_found':
+                    addLog(`Task not found: ${message.task_id}`, 'error');
+                    break;
+                
+                case 'heartbeat':
+                    // Silent heartbeat
+                    break;
+                
+                case 'pong':
+                    addLog('Pong received', 'debug');
+                    break;
+                    
+                default:
+                    addLog(`Unknown message: ${message.type}`, 'debug');
+            }
+        }
+
+        function addLog(message, level = 'info') {
+            const time = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            logEntry.innerHTML = `
+                <span class="log-time">${time}</span>
+                <span class="log-message" style="color: ${getLogColor(level)}">${message}</span>
+            `;
+            logSection.appendChild(logEntry);
+            logSection.scrollTop = logSection.scrollHeight;
+        }
+
+        function getLogColor(level) {
+            switch (level) {
+                case 'success': return '#2e7d32';
+                case 'error': return '#c62828';
+                case 'warning': return '#ef6c00';
+                case 'debug': return '#666';
+                default: return '#333';
+            }
+        }
+
+        function clearLog() {
+            logSection.innerHTML = '';
+        }
+
+        function showMessage(text, type = 'info') {
+            messages.innerHTML = `<div class="alert alert-${type}">${text}</div>`;
+            setTimeout(() => {
+                messages.innerHTML = '';
+            }, 5000);
+        }
+
+        function updateProgressDisplay(status) {
+            document.getElementById('task-name').textContent = currentTask.repositoryName;
+            document.getElementById('task-id').textContent = status.task_id || currentTask.taskId;
+            document.getElementById('task-status').textContent = status.status || 'unknown';
+            document.getElementById('task-status').className = `status-badge status-${status.status}`;
+            
+            const progress = status.overall_progress || 0;
+            document.getElementById('progress-percent').textContent = `${Math.round(progress)}%`;
+            document.getElementById('progress-fill').style.width = `${progress}%`;
+            
+            document.getElementById('files-count').textContent = status.processed_files || 0;
+            document.getElementById('chunks-count').textContent = status.generated_chunks || 0;
+            document.getElementById('current-stage').textContent = status.current_stage || 'unknown';
+            
+            if (status.status === 'completed') {
+                indexing = false;
+                btnText.textContent = 'Index Repository';
+                indexBtn.disabled = false;
+                showMessage('Repository indexed successfully!', 'success');
+            } else if (status.status === 'failed') {
+                indexing = false;
+                btnText.textContent = 'Index Repository';
+                indexBtn.disabled = false;
+                showMessage(status.error_message || 'Indexing failed', 'error');
+            }
+        }
+
+        // Form handling
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                indexMode = btn.dataset.mode;
+                
+                repoPath.placeholder = indexMode === 'local' 
+                    ? 'C:\\path\\to\\repository' 
+                    : 'https://github.com/user/repo.git';
+                
+                // Clear form
+                repoPath.value = '';
+                repoName.value = '';
+            });
+        });
+
+        repoPath.addEventListener('input', () => {
+            const path = repoPath.value;
+            if (path && !repoName.value) {
+                let name = '';
+                if (indexMode === 'local') {
+                    const parts = path.replace(/\\/g, '/').split('/');
+                    name = parts[parts.length - 1] || parts[parts.length - 2];
+                } else {
+                    const match = path.match(/[\/\\]([^\/\\]+)(?:\.git)?(?:[\/\\]?$)/);
+                    if (match) name = match[1];
+                }
+                if (name) repoName.value = name;
+            }
+        });
+
+        indexBtn.addEventListener('click', async () => {
+            if (indexing) return;
+            
+            const path = repoPath.value.trim();
+            const name = repoName.value.trim();
+            
+            if (!path || !name) {
+                showMessage('Please provide both repository path/URL and name', 'error');
+                return;
+            }
+
+            indexing = true;
+            btnText.textContent = 'Starting...';
+            indexBtn.disabled = true;
+
+            try {
+                const endpoint = indexMode === 'local' 
+                    ? '/api/v1/index/repository/local'
+                    : '/api/v1/index/repository';
+                    
+                const payload = indexMode === 'local'
+                    ? { repo_path: path, repo_name: name }
+                    : { repo_url: path, repo_name: name };
+
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.task_id) {
+                    currentTask = {
+                        taskId: result.task_id,
+                        repositoryName: name
+                    };
+
+                    // Subscribe to task updates via WebSocket
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: 'subscribe_task',
+                            task_id: result.task_id
+                        }));
+                    }
+
+                    noTask.style.display = 'none';
+                    progressContent.style.display = 'block';
+                    btnText.textContent = 'Indexing...';
+                    
+                    addLog(`Started indexing: ${name} (Task: ${result.task_id})`, 'success');
+                } else {
+                    throw new Error(result.detail || 'Failed to start indexing');
+                }
+            } catch (error) {
+                indexing = false;
+                btnText.textContent = 'Index Repository';
+                indexBtn.disabled = false;
+                showMessage(error.message, 'error');
+                addLog(`Indexing failed: ${error.message}`, 'error');
+            }
+        });
+
+        // Initialize
+        connectWebSocket();
+        
+        // Send periodic pings to keep connection alive
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ping' }));
+            }
+        }, 30000);
+    </script>
+</body>
+</html>

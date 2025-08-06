@@ -1,0 +1,90 @@
+param()
+
+Write-Host "=== FIXING CHROMADB API CONFIGURATION ===" -ForegroundColor Yellow
+
+# The issue is that ChromaDB collections endpoint is returning 404
+# This suggests we need to use direct v2 mode instead of tenant mode
+# Let's update the environment variables to force direct v2 mode
+
+Write-Host "1. Current ChromaDB test..." -ForegroundColor Cyan
+Write-Host "Heartbeat works, but collections fail - this means we need v2 direct mode" -ForegroundColor Gray
+
+Write-Host "2. Stopping current API server..." -ForegroundColor Cyan
+$processes = Get-Process python -ErrorAction SilentlyContinue
+foreach ($proc in $processes) {
+    $cmdline = ""
+    $cmdlineObj = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)" -ErrorAction SilentlyContinue
+    if ($cmdlineObj) {
+        $cmdline = $cmdlineObj.CommandLine
+    }
+    
+    if ($cmdline -and ($cmdline -like "*uvicorn*" -or $cmdline -like "*src.main*")) {
+        Write-Host "Stopping API server (PID: $($proc.Id))" -ForegroundColor Yellow
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Start-Sleep -Seconds 3
+
+Write-Host "3. Starting API with ChromaDB v2 direct mode..." -ForegroundColor Cyan
+
+# Set environment variables for direct v2 mode (no tenant structure)
+$env:CHROMA_TENANT = ""
+$env:CHROMA_DATABASE = ""
+$env:CHROMA_HOST = "localhost"
+$env:CHROMA_PORT = "8000"
+$env:APP_ENV = "development"
+$env:API_HOST = "0.0.0.0"
+$env:API_PORT = "8082"
+$env:LOG_LEVEL = "INFO"
+
+Write-Host "Environment set for direct v2 mode (no tenant/database structure)" -ForegroundColor Green
+
+# Start API server
+$apiProcess = Start-Process -FilePath "python" -ArgumentList "-m", "src.main" -PassThru -NoNewWindow
+Write-Host "API server started (PID: $($apiProcess.Id))" -ForegroundColor Green
+
+Write-Host "4. Waiting for API to initialize..." -ForegroundColor Cyan
+Start-Sleep -Seconds 15
+
+Write-Host "5. Testing API health..." -ForegroundColor Cyan
+$attempts = 0
+$maxAttempts = 8
+$apiReady = $false
+
+while ($attempts -lt $maxAttempts -and -not $apiReady) {
+    $attempts++
+    Write-Host "Health check attempt $attempts/$maxAttempts..."
+    
+    $apiHealth = Invoke-WebRequest -Uri "http://localhost:8082/api/v1/health/readiness" -UseBasicParsing -TimeoutSec 10 -ErrorAction SilentlyContinue
+    if ($apiHealth) {
+        $response = $apiHealth.Content | ConvertFrom-Json
+        Write-Host "API Status: $($response.status)" -ForegroundColor $(if($response.status -eq "ready") {"Green"} elseif($response.status -eq "not_ready") {"Yellow"} else {"Red"})
+        
+        if ($response.status -eq "ready") {
+            $apiReady = $true
+            Write-Host "SUCCESS: API is now ready!" -ForegroundColor Green
+        } elseif ($response.status -eq "not_ready") {
+            Write-Host "Still initializing... Error: $($response.self_heal.errors -join ', ')" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "API not responding yet..." -ForegroundColor Red
+    }
+    
+    if (-not $apiReady) {
+        Start-Sleep -Seconds 5
+    }
+}
+
+if ($apiReady) {
+    Write-Host "6. System is now ready!" -ForegroundColor Green
+    Write-Host "Your frontend should now show the dashboard instead of 'System is starting up'" -ForegroundColor Green
+    Write-Host "API: http://localhost:8082/api/v1/health/readiness" -ForegroundColor White
+} else {
+    Write-Host "6. API still not ready. Last response:" -ForegroundColor Red
+    if ($apiHealth) {
+        Write-Host $apiHealth.Content -ForegroundColor Gray
+    }
+}
+
+Write-Host "=== CHROMADB API FIX COMPLETED ===" -ForegroundColor Yellow

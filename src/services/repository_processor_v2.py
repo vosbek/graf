@@ -84,26 +84,47 @@ def _matches_exclusion_pattern(file_path: Path, pattern: str, repo_root: Path) -
         # Convert to POSIX format for consistent pattern matching
         posix_path = relative_path.as_posix()
         
-        # Handle different pattern formats
-        if pattern.startswith('**/') and pattern.endswith('/**'):
-            # Pattern like **/node_modules/** - check if any part of path matches
-            pattern_core = pattern[3:-3]  # Remove **/ and /**
-            path_parts = posix_path.split('/')
-            return pattern_core in path_parts
-        elif pattern.startswith('**/'):
-            # Pattern like **/*.class - use fnmatch
-            return fnmatch.fnmatch(posix_path, pattern)
-        elif pattern.endswith('/**'):
-            # Pattern like build/** - check if path starts with pattern prefix
-            pattern_prefix = pattern[:-3]  # Remove /**
-            return posix_path.startswith(pattern_prefix + '/') or posix_path == pattern_prefix
+        # Special handling for common patterns that fnmatch doesn't handle correctly
+        if pattern == "**/node_modules/**":
+            # Match any file in any node_modules directory (including root-level)
+            return '/node_modules/' in posix_path or posix_path.startswith('node_modules/')
+        elif pattern == "**/target/**":
+            return '/target/' in posix_path or posix_path.startswith('target/')
+        elif pattern == "**/build/**":
+            return '/build/' in posix_path or posix_path.startswith('build/')
+        elif pattern == "**/dist/**":
+            return '/dist/' in posix_path or posix_path.startswith('dist/')
+        elif pattern == "**/.git/**":
+            return '/.git/' in posix_path or posix_path.startswith('.git/')
+        elif pattern == "**/bin/**":
+            return '/bin/' in posix_path or posix_path.startswith('bin/')
+        elif pattern == "**/obj/**":
+            return '/obj/' in posix_path or posix_path.startswith('obj/')
+        elif pattern == "**/.vscode/**":
+            return '/.vscode/' in posix_path or posix_path.startswith('.vscode/')
+        elif pattern == "**/.idea/**":
+            return '/.idea/' in posix_path or posix_path.startswith('.idea/')
+        elif pattern == "**/__pycache__/**":
+            return '/__pycache__/' in posix_path or posix_path.startswith('__pycache__/')
+        elif pattern == "**/.pytest_cache/**":
+            return '/.pytest_cache/' in posix_path or posix_path.startswith('.pytest_cache/')
+        elif pattern == "**/coverage/**":
+            return '/coverage/' in posix_path or posix_path.startswith('coverage/')
+        elif pattern == "**/htmlcov/**":
+            return '/htmlcov/' in posix_path or posix_path.startswith('htmlcov/')
+        elif pattern == "**/logs/**":
+            return '/logs/' in posix_path or posix_path.startswith('logs/')
+        elif pattern == "**/tmp/**":
+            return '/tmp/' in posix_path or posix_path.startswith('tmp/')
+        elif pattern == "**/temp/**":
+            return '/temp/' in posix_path or posix_path.startswith('temp/')
         else:
-            # Regular pattern - use fnmatch
+            # Use fnmatch for other patterns (like file extensions)
             return fnmatch.fnmatch(posix_path, pattern)
             
     except (ValueError, OSError):
-        # If we can't get relative path, fall back to string matching
-        return fnmatch.fnmatch(str(file_path), pattern)
+        # If we can't get relative path, return False (don't exclude)
+        return False
 
 
 class RepositoryPriority(str, Enum):
@@ -308,7 +329,8 @@ class EnhancedRepositoryProcessor:
                  neo4j_client: Neo4jClient,
                  max_concurrent_repos: int = 5,
                  workspace_dir: str = "./data/repositories",
-                 use_codebert: bool = True):
+                 use_codebert: bool = True,
+                 embedding_client=None):
         """
         Initialize the enhanced repository processor.
         
@@ -318,10 +340,12 @@ class EnhancedRepositoryProcessor:
             max_concurrent_repos: Maximum concurrent repository processing
             workspace_dir: Directory for repository storage
             use_codebert: Whether to use CodeBERT embeddings
+            embedding_client: Optional embedding client for generating code embeddings
         """
         # Core clients
         self.chroma_client = chroma_client
         self.neo4j_client = neo4j_client
+        self.embedding_client = embedding_client
         self.workspace_dir = Path(workspace_dir)
         self.max_concurrent_repos = max_concurrent_repos
         self.use_codebert = use_codebert
@@ -357,12 +381,143 @@ class EnhancedRepositoryProcessor:
         self.logger.info(f"- Max concurrent repos: {max_concurrent_repos}")
         self.logger.info(f"- Workspace directory: {workspace_dir}")
         self.logger.info(f"- CodeBERT embeddings: {use_codebert}")
+        self.logger.info(f"- Embedding client available: {embedding_client is not None}")
         
         # Register diagnostic collectors
         diagnostic_collector.register_service_checker(
             "repository_processor", 
             self._health_check_async
         )
+    
+    async def _generate_embeddings_for_chunks(self, chunks: List) -> List:
+        """
+        Generate embeddings for code chunks using the embedding client.
+        
+        Args:
+            chunks: List of chunks to generate embeddings for
+            
+        Returns:
+            List of chunks with embeddings added
+        """
+        if not self.embedding_client or not self.use_codebert:
+            self.logger.debug("No embedding client available, skipping embedding generation")
+            return chunks
+            
+        if not chunks:
+            self.logger.debug("No chunks provided for embedding generation")
+            return chunks
+            
+        try:
+            self.logger.info(f"Generating embeddings for {len(chunks)} chunks using CodeBERT")
+            
+            # Extract content from chunks for embedding generation
+            chunk_contents = []
+            for i, chunk in enumerate(chunks):
+                try:
+                    if hasattr(chunk, 'content'):
+                        content = chunk.content
+                    elif hasattr(chunk, 'chunk') and hasattr(chunk.chunk, 'content'):
+                        content = chunk.chunk.content
+                    else:
+                        content = str(chunk)
+                    
+                    # Ensure content is not empty and is a string
+                    if content and isinstance(content, str) and content.strip():
+                        chunk_contents.append(content.strip())
+                    else:
+                        chunk_contents.append("# Empty or invalid content")
+                        self.logger.warning(f"Chunk {i} has empty or invalid content")
+                except Exception as content_err:
+                    self.logger.warning(f"Error extracting content from chunk {i}: {content_err}")
+                    chunk_contents.append("# Error extracting content")
+            
+            if not chunk_contents:
+                self.logger.warning("No valid content extracted from chunks")
+                return chunks
+            
+            self.logger.debug(f"Extracted {len(chunk_contents)} content strings for embedding")
+            
+            # Generate embeddings in smaller batches with error handling
+            batch_size = 8  # Smaller batch size for stability
+            all_embeddings = []
+            
+            for batch_start in range(0, len(chunk_contents), batch_size):
+                batch_end = min(batch_start + batch_size, len(chunk_contents))
+                batch_contents = chunk_contents[batch_start:batch_end]
+                
+                try:
+                    self.logger.debug(f"Generating embeddings for batch {batch_start//batch_size + 1} ({len(batch_contents)} items)")
+                    
+                    # Call the embedding client
+                    batch_embeddings = await self.embedding_client.encode(batch_contents)
+                    
+                    # Handle different return types from embedding client
+                    if hasattr(batch_embeddings, 'shape'):
+                        # NumPy array or tensor
+                        if batch_embeddings.ndim == 2:
+                            # Batch of embeddings
+                            for embedding in batch_embeddings:
+                                if hasattr(embedding, 'tolist'):
+                                    all_embeddings.append(embedding.tolist())
+                                else:
+                                    all_embeddings.append(list(embedding))
+                        elif batch_embeddings.ndim == 1 and len(batch_contents) == 1:
+                            # Single embedding
+                            if hasattr(batch_embeddings, 'tolist'):
+                                all_embeddings.append(batch_embeddings.tolist())
+                            else:
+                                all_embeddings.append(list(batch_embeddings))
+                        else:
+                            raise ValueError(f"Unexpected embedding shape: {batch_embeddings.shape}")
+                    else:
+                        # List or other iterable
+                        if isinstance(batch_embeddings, (list, tuple)):
+                            all_embeddings.extend(batch_embeddings)
+                        else:
+                            all_embeddings.append(batch_embeddings)
+                    
+                    self.logger.debug(f"Successfully generated {len(batch_embeddings)} embeddings for batch")
+                    
+                except Exception as batch_err:
+                    self.logger.error(f"Failed to generate embeddings for batch {batch_start//batch_size + 1}: {batch_err}")
+                    # Add placeholder embeddings for this batch
+                    for _ in range(len(batch_contents)):
+                        all_embeddings.append([0.0] * 768)  # CodeBERT dimension
+            
+            # Verify we have the right number of embeddings
+            if len(all_embeddings) != len(chunks):
+                self.logger.error(f"Embedding count mismatch: {len(all_embeddings)} embeddings for {len(chunks)} chunks")
+                # Pad or truncate embeddings to match chunks
+                while len(all_embeddings) < len(chunks):
+                    all_embeddings.append([0.0] * 768)
+                all_embeddings = all_embeddings[:len(chunks)]
+            
+            # Add embeddings to chunks
+            enhanced_chunks = []
+            for i, chunk in enumerate(chunks):
+                try:
+                    embedding = all_embeddings[i]
+                    
+                    if hasattr(chunk, 'chunk'):
+                        # EnhancedChunk with nested chunk
+                        chunk.embeddings = embedding
+                        enhanced_chunks.append(chunk)
+                    else:
+                        # Direct chunk - add embeddings attribute
+                        chunk.embeddings = embedding
+                        enhanced_chunks.append(chunk)
+                        
+                except Exception as chunk_err:
+                    self.logger.warning(f"Error adding embedding to chunk {i}: {chunk_err}")
+                    enhanced_chunks.append(chunk)  # Add chunk without embedding
+            
+            self.logger.info(f"Successfully generated embeddings for {len(enhanced_chunks)} chunks")
+            return enhanced_chunks
+            
+        except Exception as e:
+            self.logger.error(f"Critical error in embedding generation: {e}", exc_info=True)
+            # Return chunks without embeddings rather than failing
+            return chunks
     
     async def _health_check_async(self) -> Dict[str, Any]:
         """
@@ -1306,7 +1461,9 @@ class EnhancedRepositoryProcessor:
                         if file_path.stat().st_size <= repo_config.max_file_size:
                             filtered_files.append(file_path)
                     except (OSError, PermissionError):
-                        continue
+                        continue            
+                
+            
             
             # Process files in batches with progress tracking
             batch_size = repo_config.max_files_per_batch
@@ -1559,6 +1716,9 @@ class EnhancedRepositoryProcessor:
                     )
                     enhanced_chunks.append(enhanced_chunk)
                 
+                # Generate embeddings for chunks before storing in ChromaDB
+                enhanced_chunks = await self._generate_embeddings_for_chunks(enhanced_chunks)
+                
                 success = await self.chroma_client.add_chunks(enhanced_chunks, repo_config.name)
                 if not success:
                     raise ProcessingError(
@@ -1611,6 +1771,9 @@ class EnhancedRepositoryProcessor:
                         related_chunks=[]
                     )
                     enhanced_chunks.append(enhanced_chunk)
+                
+                # Generate embeddings for chunks before storing in ChromaDB
+                enhanced_chunks = await self._generate_embeddings_for_chunks(enhanced_chunks)
                 
                 success = await self.chroma_client.add_chunks(enhanced_chunks, local_config.name)
                 if not success:

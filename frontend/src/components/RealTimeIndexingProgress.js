@@ -64,9 +64,27 @@ function RealTimeIndexingProgress({ taskId, repositoryName, onComplete, onError 
   const reconnectAttempts = useRef(0);
   const maxReconnectAttempts = 5;
 
+  const loadInitialStatus = async () => {
+    try {
+      const apiUrl = process.env.REACT_APP_API_URL || '';
+      const baseUrl = apiUrl || `${window.location.protocol}//${window.location.host}`;
+      const response = await fetch(`${baseUrl}/api/v1/index/status/${taskId}`);
+      
+      if (response.ok) {
+        const statusData = await response.json();
+        setStatus(statusData);
+      }
+    } catch (error) {
+      console.error('Failed to load initial status:', error);
+    }
+  };
+
   useEffect(() => {
     if (taskId) {
-      connectWebSocket();
+      // Load initial status first
+      loadInitialStatus();
+      // Small delay to allow API server to fully initialize the task
+      setTimeout(() => connectWebSocket(), 500);
     }
 
     return () => {
@@ -144,7 +162,9 @@ function RealTimeIndexingProgress({ taskId, repositoryName, onComplete, onError 
         try {
           const message = JSON.parse(event.data);
           
-          if (message.type === 'status_update' && message.data) {
+          // Handle wrapped status updates (both status_update and task_status)
+          if ((message.type === 'status_update' || message.type === 'task_status' || message.type === 'initial_status') && message.data) {
+            console.log('Received wrapped status update:', message.type, message.data);
             setStatus(message.data);
             
             // Check if indexing is complete
@@ -153,7 +173,21 @@ function RealTimeIndexingProgress({ taskId, repositoryName, onComplete, onError 
             } else if (message.data.status === 'failed' && onError) {
               onError(message.data);
             }
-          } else if (message.type === 'error') {
+          } 
+          // Handle direct status data (if server sends raw status)
+          else if (message.task_id || message.repository_name) {
+            console.log('Received direct status data:', message);
+            setStatus(message);
+            
+            // Check if indexing is complete
+            if (message.status === 'completed' && onComplete) {
+              onComplete(message);
+            } else if (message.status === 'failed' && onError) {
+              onError(message);
+            }
+          }
+          // Handle error messages
+          else if (message.type === 'error') {
             setConnectionError(message.message);
             if (onError) {
               onError({ error_message: message.message });
@@ -179,18 +213,25 @@ function RealTimeIndexingProgress({ taskId, repositoryName, onComplete, onError 
         } else if (reconnectAttempts.current >= maxReconnectAttempts) {
           // Fall back to polling if WebSocket fails
           console.log('WebSocket reconnection failed, falling back to polling');
+          setConnectionError('Connection failed after multiple attempts, using fallback method');
           startPolling();
         }
       };
 
       wsRef.current.onerror = (error) => {
         console.error('WebSocket error:', error);
-        setConnectionError('Connection error occurred');
+        // Don't immediately show error - let reconnection attempts handle it
+        if (reconnectAttempts.current >= maxReconnectAttempts) {
+          setConnectionError('Connection error occurred');
+        }
       };
 
     } catch (error) {
       console.error('Failed to create WebSocket connection:', error);
-      setConnectionError('Failed to establish connection');
+      // Don't immediately show error - let reconnection attempts handle it
+      if (reconnectAttempts.current >= maxReconnectAttempts) {
+        setConnectionError('Failed to establish connection');
+      }
     }
   };
 
@@ -272,16 +313,16 @@ function RealTimeIndexingProgress({ taskId, repositoryName, onComplete, onError 
           
           <LinearProgress
             variant="determinate"
-            value={status.overall_progress}
+            value={status.overall_progress || 0}
             sx={{ mb: 1, height: 8, borderRadius: 4 }}
           />
           
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Typography variant="body2" color="text.secondary">
-              {status.overall_progress.toFixed(1)}% complete
+              {(status.overall_progress || 0).toFixed(1)}% complete
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              {formatDuration(status.processing_time)}
+              {formatDuration(status.processing_time || 0)}
             </Typography>
           </Box>
 
@@ -436,19 +477,19 @@ function RealTimeIndexingProgress({ taskId, repositoryName, onComplete, onError 
             <Box>
               <Typography variant="body2" color="text.secondary">Files Processed</Typography>
               <Typography variant="h6">
-                {status.processed_files}
+                {status.processed_files || 0}
                 {status.total_files && ` / ${status.total_files}`}
               </Typography>
             </Box>
             
             <Box>
               <Typography variant="body2" color="text.secondary">Chunks Generated</Typography>
-              <Typography variant="h6">{status.generated_chunks}</Typography>
+              <Typography variant="h6">{status.generated_chunks || 0}</Typography>
             </Box>
             
             <Box>
               <Typography variant="body2" color="text.secondary">Chunks Stored</Typography>
-              <Typography variant="h6">{status.stored_chunks}</Typography>
+              <Typography variant="h6">{status.stored_chunks || 0}</Typography>
             </Box>
             
             {status.throughput_files_per_second > 0 && (

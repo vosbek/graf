@@ -134,15 +134,15 @@ class TreeSitterParser:
         elif language == SupportedLanguage.JAVASCRIPT:
             chunks, relationships = self._parse_javascript(code, tree, file_path)
         elif language == SupportedLanguage.TYPESCRIPT:
-            chunks, relationships = self._parse_typescript(code, tree, file_path)
+            chunks, relationships = self._parse_generic(code, tree, file_path, language)
         elif language == SupportedLanguage.RUST:
-            chunks, relationships = self._parse_rust(code, tree, file_path)
+            chunks, relationships = self._parse_generic(code, tree, file_path, language)
         elif language == SupportedLanguage.GO:
-            chunks, relationships = self._parse_go(code, tree, file_path)
+            chunks, relationships = self._parse_generic(code, tree, file_path, language)
         elif language == SupportedLanguage.JAVA:
-            chunks, relationships = self._parse_java(code, tree, file_path)
+            chunks, relationships = self._parse_generic(code, tree, file_path, language)
         elif language == SupportedLanguage.CPP:
-            chunks, relationships = self._parse_cpp(code, tree, file_path)
+            chunks, relationships = self._parse_generic(code, tree, file_path, language)
         elif language == SupportedLanguage.JSP:
             chunks, relationships = self._parse_jsp(code, tree, file_path)
         elif language == SupportedLanguage.XML:

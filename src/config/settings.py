@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     # ChromaDB settings
     chroma_host: str = Field(default="localhost", description="ChromaDB host")
     chroma_port: int = Field(default=8000, description="ChromaDB port")
+    chroma_tenant: Optional[str] = Field(default=None, description="ChromaDB tenant (v2 API)")
+    chroma_database: Optional[str] = Field(default=None, description="ChromaDB database (v2 API)")
     chroma_collection_name: str = Field(default="codebase_chunks", description="ChromaDB collection name")
     chroma_persist_directory: str = Field(default="./data/chroma", description="ChromaDB persist directory")
     
