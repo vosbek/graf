@@ -1,0 +1,159 @@
+version: '3.8'
+
+services:
+  # ChromaDB - Vector Database (Windows optimized)
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: codebase-rag-chromadb
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+      - ./config/chromadb:/chroma/config
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+      - CHROMA_SERVER_GRPC_PORT=50051
+      - CHROMA_SERVER_AUTHN_PROVIDER=chromadb.auth.basic_authn.BasicAuthenticationServerProvider
+      - CHROMA_SERVER_AUTHN_CREDENTIALS_FILE=/chroma/config/auth.txt
+      - CHROMA_DB_IMPL=clickhouse
+      - CHROMA_MEMORY_LIMIT_BYTES=8589934592  # 8GB
+      - ANONYMIZED_TELEMETRY=false
+    networks:
+      - codebase-rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    # Windows optimized resource limits
+    memory: 8g
+    cpus: 4
+
+  # Neo4j - Graph Database (Windows optimized)
+  neo4j:
+    image: neo4j:5.15
+    container_name: codebase-rag-neo4j
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/codebase-rag-2024
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=apoc.*
+      - NEO4J_server_memory_heap_initial__size=2G
+      - NEO4J_server_memory_heap_max__size=4G
+      - NEO4J_server_memory_pagecache_size=4G
+      - NEO4J_server_default__listen__address=0.0.0.0
+      - NEO4J_dbms_logs_debug_level=INFO
+      - NEO4J_dbms_checkpoint_interval_time=300s
+      - NEO4J_dbms_checkpoint_interval_tx=50000
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/import
+      - neo4j_plugins:/plugins
+      - ./config/neo4j:/conf
+      - ./scripts/neo4j:/scripts
+    networks:
+      - codebase-rag-network
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "codebase-rag-2024", "MATCH () RETURN count(*) as count"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    # Windows optimized resource limits
+    memory: 12g
+    cpus: 4
+
+  # Redis - Task Queue and Caching
+  redis:
+    image: redis:7-alpine
+    container_name: codebase-rag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./config/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - codebase-rag-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    memory: 2g
+    cpus: 1
+
+  # MinIO - S3-compatible storage for repositories
+  minio:
+    image: minio/minio:latest
+    container_name: codebase-rag-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=codebase-rag
+      - MINIO_ROOT_PASSWORD=codebase-rag-2024
+      - MINIO_DOMAIN=localhost
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - codebase-rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    memory: 1g
+    cpus: 1
+
+  # PostgreSQL - Metadata and application data
+  postgres:
+    image: postgres:15-alpine
+    container_name: codebase-rag-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=codebase_rag
+      - POSTGRES_USER=codebase_rag
+      - POSTGRES_PASSWORD=codebase-rag-2024
+      - POSTGRES_INITDB_ARGS="--data-checksums"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./config/postgres/postgresql.conf:/etc/postgresql/postgresql.conf
+      - ./config/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf
+      - ./scripts/postgres:/docker-entrypoint-initdb.d
+    networks:
+      - codebase-rag-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codebase_rag -d codebase_rag"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    memory: 2g
+    cpus: 1
+
+networks:
+  codebase-rag-network:
+    driver: bridge
+
+volumes:
+  chromadb_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neo4j_plugins:
+  redis_data:
+  minio_data:
+  postgres_data:
