@@ -523,6 +523,16 @@ interface IngestionStatus {
     - Proper error handling with batch-level retry capability
   - **Impact**: Enables successful ingestion of large repositories without hanging
 
+- **Embedding Generation Performance Fix**: Resolved extremely slow embedding generation for large repositories
+  - **Root Cause**: Embedding batch size of 8 caused 27K+ chunks to require 3,384+ separate API calls to CodeBERT
+  - **Solution**: Optimized embedding batch size in `src/services/repository_processor_v2.py:441`
+  - **Improvements**:
+    - Increased batch size from 8 to 64 (8x performance improvement)
+    - Reduced API calls from ~3,384 to ~423 for 27K chunks
+    - Added detailed batch progress logging for monitoring
+    - Maintained error handling and stability with larger batches
+  - **Impact**: Dramatically faster embedding generation, eliminating apparent "hanging" during embedding stage
+
 ### **Previous Updates (2025-08-06)**
 
 ### **Frontend UX Enhancements**

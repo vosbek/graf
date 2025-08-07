@@ -421,6 +421,9 @@ class ChromaDBClient:
             total_chunks = len(documents)
             
             logger.info(f"Adding {total_chunks} chunks to collection {collection_name} in batches of {batch_size}")
+            logger.info(f"ChromaDB Client Config: use_v1_mode={self.use_v1_mode}, tenant={self.tenant}, database={self.database}")
+            logger.info(f"Collection URL: {url}")
+            logger.info(f"Collection ID: {collection_id}")
             
             # Process chunks in batches
             for i in range(0, total_chunks, batch_size):
@@ -452,15 +455,18 @@ class ChromaDBClient:
             return True
             
         except Exception as e:
-            logger.error(f"Failed to add chunks to ChromaDB: {e}")
-            logger.error(f"Chunks count: {len(chunks)}")
-            logger.error(f"Collection name: {collection_name}")
+            logger.error(f"🚨 CRITICAL: Failed to add chunks to ChromaDB - Exception: {e}")
+            logger.error(f"🚨 Exception type: {type(e)}")
+            logger.error(f"🚨 Exception args: {e.args}")
+            logger.error(f"🚨 Chunks count: {len(chunks)}")
+            logger.error(f"🚨 Collection name: {collection_name}")
             if chunks:
                 sample_chunk = chunks[0]
-                logger.error(f"Sample chunk type: {type(sample_chunk)}")
-                logger.error(f"Sample chunk attributes: {[attr for attr in dir(sample_chunk) if not attr.startswith('_')]}")
+                logger.error(f"🚨 Sample chunk type: {type(sample_chunk)}")
+                logger.error(f"🚨 Sample chunk attributes: {[attr for attr in dir(sample_chunk) if not attr.startswith('_')]}")
                 if hasattr(sample_chunk, 'chunk'):
-                    logger.error(f"Nested chunk attributes: {[attr for attr in dir(sample_chunk.chunk) if not attr.startswith('_')]}")
+                    logger.error(f"🚨 Nested chunk attributes: {[attr for attr in dir(sample_chunk.chunk) if not attr.startswith('_')]}")
+            logger.error(f"🚨 Full traceback:", exc_info=True)
             return False
 
     async def get_statistics(self) -> Dict[str, Any]:

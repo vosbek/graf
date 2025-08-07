@@ -29,7 +29,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Any, Union, Tuple
+from typing import Dict, List, Optional, Set, Any, Union, Tuple, Callable
 import uuid
 import fnmatch
 
@@ -389,12 +389,13 @@ class EnhancedRepositoryProcessor:
             self._health_check_async
         )
     
-    async def _generate_embeddings_for_chunks(self, chunks: List) -> List:
+    async def _generate_embeddings_for_chunks(self, chunks: List, progress_callback: Optional[Callable] = None) -> List:
         """
         Generate embeddings for code chunks using the embedding client.
         
         Args:
             chunks: List of chunks to generate embeddings for
+            progress_callback: Optional callback for progress updates
             
         Returns:
             List of chunks with embeddings added
@@ -437,8 +438,8 @@ class EnhancedRepositoryProcessor:
             
             self.logger.debug(f"Extracted {len(chunk_contents)} content strings for embedding")
             
-            # Generate embeddings in smaller batches with error handling
-            batch_size = 8  # Smaller batch size for stability
+            # Generate embeddings in optimized batches with error handling
+            batch_size = 64  # Increased batch size for better performance (was 8)
             all_embeddings = []
             
             for batch_start in range(0, len(chunk_contents), batch_size):
@@ -446,7 +447,9 @@ class EnhancedRepositoryProcessor:
                 batch_contents = chunk_contents[batch_start:batch_end]
                 
                 try:
-                    self.logger.debug(f"Generating embeddings for batch {batch_start//batch_size + 1} ({len(batch_contents)} items)")
+                    batch_num = batch_start//batch_size + 1
+                    total_batches = (len(chunk_contents) + batch_size - 1) // batch_size
+                    self.logger.info(f"Generating embeddings for batch {batch_num}/{total_batches} ({len(batch_contents)} items, {batch_start+len(batch_contents)}/{len(chunk_contents)} total)")
                     
                     # Call the embedding client
                     batch_embeddings = await self.embedding_client.encode(batch_contents)
@@ -1717,9 +1720,17 @@ class EnhancedRepositoryProcessor:
                     enhanced_chunks.append(enhanced_chunk)
                 
                 # Generate embeddings for chunks before storing in ChromaDB
+                self.logger.info(f"🚀 Starting embedding generation for {len(enhanced_chunks)} chunks")
                 enhanced_chunks = await self._generate_embeddings_for_chunks(enhanced_chunks)
+                self.logger.info(f"✅ Completed embedding generation, now have {len(enhanced_chunks)} enhanced chunks")
+                
+                self.logger.info(f"🔄 About to store {len(enhanced_chunks)} enhanced chunks to ChromaDB for repo '{repo_config.name}'")
+                self.logger.info(f"🔍 ChromaDB client type: {type(self.chroma_client)}")
+                self.logger.info(f"🔍 Sample enhanced chunk type: {type(enhanced_chunks[0]) if enhanced_chunks else 'No chunks'}")
                 
                 success = await self.chroma_client.add_chunks(enhanced_chunks, repo_config.name)
+                
+                self.logger.info(f"🎯 ChromaDB storage result: {success}")
                 if not success:
                     raise ProcessingError(
                         "Failed to store chunks in ChromaDB",

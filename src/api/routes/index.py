@@ -333,41 +333,62 @@ class StatusUpdateManager:
     
     async def broadcast_status_update(self, task_id: str, status: Dict[str, Any]) -> None:
         """Broadcast status update to all connected WebSocket clients."""
+        from ...core.logging_config import get_logger
+        logger = get_logger(__name__)
+        
+        logger.info(f"🔊 Broadcasting status update for task {task_id}: {status.get('current_stage', 'unknown')} - {status.get('overall_progress', 0):.1f}%")
+        
         message = {
             "type": "task_status",
             "task_id": task_id,
             "data": status
         }
         
+        total_sent = 0
+        
         # Broadcast to task-specific WebSocket connections
         if task_id in active_websockets:
             connected_clients = []
+            initial_count = len(active_websockets[task_id])
+            logger.info(f"📡 Broadcasting to {initial_count} task-specific WebSocket clients for {task_id}")
+            
             for websocket in active_websockets[task_id]:
                 try:
                     await websocket.send_text(json.dumps(message, default=str))
                     connected_clients.append(websocket)
-                except:
-                    # Client disconnected, skip
-                    pass
+                    total_sent += 1
+                except Exception as e:
+                    logger.warning(f"Failed to send WebSocket message to task-specific client: {e}")
             
             active_websockets[task_id] = connected_clients
             if not connected_clients:
                 del active_websockets[task_id]
+                logger.info(f"Removed empty WebSocket client list for task {task_id}")
+        else:
+            logger.info(f"No task-specific WebSocket clients for {task_id}")
         
         # Broadcast to live status WebSocket connections (subscribed to this task)
         if task_id in subscribed_tasks:
             connected_subscribers = []
+            initial_count = len(subscribed_tasks[task_id])
+            logger.info(f"📡 Broadcasting to {initial_count} live-status WebSocket clients for {task_id}")
+            
             for websocket in subscribed_tasks[task_id]:
                 try:
                     await websocket.send_text(json.dumps(message, default=str))
                     connected_subscribers.append(websocket)
-                except:
-                    # Client disconnected, skip
-                    pass
+                    total_sent += 1
+                except Exception as e:
+                    logger.warning(f"Failed to send WebSocket message to live-status client: {e}")
             
             subscribed_tasks[task_id] = connected_subscribers
             if not connected_subscribers:
                 del subscribed_tasks[task_id]
+                logger.info(f"Removed empty live-status WebSocket client list for task {task_id}")
+        else:
+            logger.info(f"No live-status WebSocket clients subscribed to {task_id}")
+        
+        logger.info(f"✅ Status broadcast complete for {task_id}: sent to {total_sent} clients")
 
 
 @router.post("/repository", response_model=IndexingStatusResponse)

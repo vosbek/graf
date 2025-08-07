@@ -563,7 +563,7 @@ class ConfigurationValidator:
             async with httpx.AsyncClient() as client:
                 try:
                     response = await client.get(
-                        f"http://{chroma_host}:{chroma_port}/api/v1/heartbeat",
+                        f"http://{chroma_host}:{chroma_port}/api/v2/heartbeat",
                         timeout=10.0
                     )
                     if response.status_code == 200:
@@ -767,7 +767,7 @@ class ConfigurationValidator:
         
         endpoints = [
             ("API Server", f"http://{self.settings.api_host}:{self.settings.api_port}/api/v1/health/"),
-            ("ChromaDB", f"http://{self.settings.chroma_host}:{self.settings.chroma_port}/api/v1/heartbeat"),
+            ("ChromaDB", f"http://{self.settings.chroma_host}:{self.settings.chroma_port}/api/v2/heartbeat"),
         ]
         
         async with httpx.AsyncClient() as client:
