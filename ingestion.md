@@ -505,7 +505,25 @@ interface IngestionStatus {
 
 ---
 
-## 🔧 **Recent Updates (2025-08-06)**
+## 🔧 **Recent Updates (2025-08-07)**
+
+### **Critical Bug Fixes**
+- **ChromaDB Race Condition Fix**: Resolved 409 "Collection already exists" errors that prevented API initialization and repository ingestion
+  - Implemented robust retry mechanism with exponential backoff in `src/core/chromadb_client.py:129`
+  - Added proper race condition handling for concurrent collection creation attempts
+  - Fixed "Background initialization failed" errors that blocked the EnhancedRepositoryProcessor
+
+- **ChromaDB Storage Timeout Fix**: Resolved ingestion hanging at "embedding" stage due to storage failures
+  - **Root Cause**: Large repositories (27K+ chunks) caused timeouts when storing all chunks in single HTTP request
+  - **Solution**: Implemented batched storage in `src/core/chromadb_client.py:418-452`
+  - **Improvements**:
+    - Process chunks in batches of 500 to avoid memory/network issues
+    - Extended timeout to 120 seconds for storage operations
+    - Added detailed batch progress logging
+    - Proper error handling with batch-level retry capability
+  - **Impact**: Enables successful ingestion of large repositories without hanging
+
+### **Previous Updates (2025-08-06)**
 
 ### **Frontend UX Enhancements**
 - **Enhanced Ingestion Interface**: New tabbed interface with persistent monitoring

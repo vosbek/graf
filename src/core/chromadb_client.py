@@ -132,35 +132,56 @@ class ChromaDBClient:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Ensure a collection exists. Try get; if missing, create via v2 endpoint.
+        Ensure a collection exists with robust race condition handling.
+        Try get; if missing, create via v2 endpoint with retries.
         Returns collection info dict.
         """
+        import asyncio
+        
         collection_name = name or self.collection_name
         logger.info(f"Attempting to get or create collection: {collection_name} (tenant: {self.tenant})")
         
-        collection = await self.get_collection(collection_name)
-        if collection:
-            logger.info(f"Collection found: {collection_name} (id: {collection.get('id')}, tenant: {self.tenant})")
-            return collection
+        # Retry mechanism for race condition handling
+        max_retries = 3
+        for attempt in range(max_retries):
+            # First, try to get the collection
+            collection = await self.get_collection(collection_name)
+            if collection:
+                logger.info(f"Collection found: {collection_name} (id: {collection.get('id')}, tenant: {self.tenant})")
+                return collection
 
-        # Create if not found
-        logger.info(f"Collection not found, creating new collection: {collection_name} (tenant: {self.tenant}, metadata: {metadata})")
+            # Collection doesn't exist, try to create it
+            logger.info(f"Collection not found, creating new collection: {collection_name} (tenant: {self.tenant}, metadata: {metadata})")
+            
+            try:
+                created = await self.create_collection(collection_name, metadata=metadata)
+                logger.info(f"Collection created successfully: {collection_name} (id: {created.get('id')}, tenant: {self.tenant})")
+                return created
+            except Exception as e:
+                error_str = str(e)
+                if "already exists" in error_str or "409" in error_str:
+                    # Collection was created by another process - try to get it again
+                    logger.info(f"Collection already exists (attempt {attempt + 1}/{max_retries}), retrying fetch: {collection_name}")
+                    if attempt < max_retries - 1:
+                        # Wait a bit to avoid race condition, then retry the whole process
+                        await asyncio.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                        continue
+                    else:
+                        # Final attempt - try to get the collection one more time
+                        existing = await self.get_collection(collection_name)
+                        if existing:
+                            logger.info(f"Collection retrieved on final attempt: {collection_name}")
+                            return existing
+                        # If we still can't get it, something's wrong
+                        logger.error(f"Failed to retrieve collection after multiple attempts: {collection_name}")
+                        raise
+                else:
+                    # Different error - log and re-raise
+                    logger.warning(f"Collection creation failed: {collection_name} (tenant: {self.tenant}, error: {error_str}) - Check if Chroma server supports tenant endpoints or requires authentication")
+                    raise
         
-        try:
-            created = await self.create_collection(collection_name, metadata=metadata)
-            logger.info(f"Collection created successfully: {collection_name} (id: {created.get('id')}, tenant: {self.tenant})")
-            return created
-        except Exception as e:
-            error_str = str(e)
-            if "already exists" in error_str:
-                # Collection already exists, try to get it again
-                logger.info(f"Collection already exists, fetching: {collection_name}")
-                existing = await self.get_collection(collection_name)
-                if existing:
-                    return existing
-            logger.warning(f"Collection creation failed: {collection_name} (tenant: {self.tenant}, error: {error_str}) - Check if Chroma server supports tenant endpoints or requires authentication")
-            # Re-raise with context but don't fail hard - allow degraded mode
-            raise
+        # Should not reach here, but just in case
+        raise Exception(f"Failed to get or create collection after {max_retries} attempts: {collection_name}")
 
     async def get_collection(self, name: Optional[str]) -> Optional[Dict[str, Any]]:
         """Return collection info if exists; otherwise None."""
@@ -394,20 +415,40 @@ class ChromaDBClient:
                 logger.error(f"Could not get collection ID for {collection_name}")
                 return False
             
-            # Add to ChromaDB collection using collection ID
+            # Add to ChromaDB collection using collection ID in batches to avoid timeouts
             url = f"{self._get_collections_url()}/{collection_id}/add"
-            payload = {
-                "documents": documents,
-                "metadatas": metadatas,
-                "ids": ids
-            }
+            batch_size = 500  # Process chunks in smaller batches to avoid timeouts
+            total_chunks = len(documents)
             
-            # Only include embeddings if we have them
-            if embeddings and len(embeddings) == len(documents):
-                payload["embeddings"] = embeddings
+            logger.info(f"Adding {total_chunks} chunks to collection {collection_name} in batches of {batch_size}")
             
-            await self._post_json(url, payload)
-            logger.info(f"Successfully added {len(chunks)} chunks to collection {collection_name}")
+            # Process chunks in batches
+            for i in range(0, total_chunks, batch_size):
+                end_idx = min(i + batch_size, total_chunks)
+                batch_documents = documents[i:end_idx]
+                batch_metadatas = metadatas[i:end_idx]
+                batch_ids = ids[i:end_idx]
+                
+                payload = {
+                    "documents": batch_documents,
+                    "metadatas": batch_metadatas,
+                    "ids": batch_ids
+                }
+                
+                # Only include embeddings if we have them
+                if embeddings and len(embeddings) == len(documents):
+                    batch_embeddings = embeddings[i:end_idx]
+                    payload["embeddings"] = batch_embeddings
+                
+                # Use longer timeout for storage operations
+                try:
+                    await self._post_json(url, payload, timeout_override=120.0)  # 2-minute timeout for storage
+                    logger.info(f"Successfully added batch {i//batch_size + 1}/{(total_chunks + batch_size - 1)//batch_size} ({end_idx - i} chunks)")
+                except Exception as e:
+                    logger.error(f"Failed to add batch {i//batch_size + 1} (chunks {i}-{end_idx}): {e}")
+                    raise  # Re-raise to fail the entire operation
+            
+            logger.info(f"Successfully added all {total_chunks} chunks to collection {collection_name}")
             return True
             
         except Exception as e:
@@ -542,10 +583,14 @@ class ChromaDBClient:
                 return await resp.json()
             return await resp.text()
 
-    async def _post_json(self, url: str, payload: Dict[str, Any]) -> Any:
+    async def _post_json(self, url: str, payload: Dict[str, Any], timeout_override: Optional[float] = None) -> Any:
         if self._session is None:
             raise RuntimeError("Client not initialized")
-        async with self._session.post(url, headers=self._headers, data=json.dumps(payload)) as resp:
+        
+        # Use custom timeout if provided, otherwise use default session timeout
+        timeout = aiohttp.ClientTimeout(total=timeout_override) if timeout_override else None
+        
+        async with self._session.post(url, headers=self._headers, data=json.dumps(payload), timeout=timeout) as resp:
             if resp.status >= 400:
                 text = await resp.text()
                 raise ChromaV2Error(f"POST {url} failed: {resp.status} {text}")
